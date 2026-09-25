@@ -1,5 +1,6 @@
 "use client";
 
+import { AnimatePresence, motion } from "motion/react";
 import { useRef, useState } from "react";
 import type { Lines } from "@/lib/image";
 
@@ -88,13 +89,16 @@ export default function SplitEditor({ url, naturalWidth, naturalHeight, lines, l
     const lx = (lines[loupe.fy < lines.h ? "vTop" : "vBottom"] * W - px) * ZOOM + LOUPE / 2;
     const ly = (lines.h * H - py) * ZOOM + LOUPE / 2;
     loupeEl = (
-      <div
-        className="pointer-events-none absolute z-30 overflow-hidden rounded-full border-2 border-white shadow-xl ring-1 ring-black/30"
+      <motion.div
+        key="loupe"
+        initial={{ opacity: 0, scale: 0.6 }}
+        animate={{ opacity: 1, scale: 1, left, top }}
+        exit={{ opacity: 0, scale: 0.6 }}
+        transition={{ type: "spring", stiffness: 700, damping: 40, mass: 0.5 }}
+        className="pointer-events-none absolute z-30 overflow-hidden rounded-full border-[3px] border-white shadow-2xl ring-1 ring-black/20"
         style={{
           width: LOUPE,
           height: LOUPE,
-          left,
-          top,
           backgroundImage: `url(${url})`,
           backgroundRepeat: "no-repeat",
           backgroundSize: `${W * ZOOM}px ${H * ZOOM}px`,
@@ -102,13 +106,63 @@ export default function SplitEditor({ url, naturalWidth, naturalHeight, lines, l
           backgroundColor: "#fff",
         }}
       >
-        <div className="absolute inset-x-0 h-px bg-rose-500" style={{ top: ly }} />
-        <div className="absolute inset-y-0 w-px bg-rose-500" style={{ left: lx }} />
-      </div>
+        <div className="absolute inset-x-0 h-px bg-[var(--accent-2)]" style={{ top: ly }} />
+        <div className="absolute inset-y-0 w-px bg-[var(--accent-2)]" style={{ left: lx }} />
+      </motion.div>
     );
   }
 
-  const lineBase = "absolute z-20 flex items-center justify-center touch-none outline-none group";
+  // Lines glide when moved by buttons (Auto / Center / Apply to all) but track the pointer 1:1 while dragging.
+  const glide = active ? "none" : "top .5s cubic-bezier(.22,1,.36,1), left .5s cubic-bezier(.22,1,.36,1), height .5s cubic-bezier(.22,1,.36,1)";
+
+  const cut = (key: LineKey, label: string) => {
+    const horizontal = key === "h";
+    const isActive = active === key;
+    const color = horizontal ? "var(--cut-h)" : "var(--cut-v)";
+    const style: React.CSSProperties = horizontal
+      ? { top: pct(lines.h), transition: glide }
+      : key === "vTop"
+        ? { left: pct(lines.vTop), top: 0, height: pct(lines.h), transition: glide }
+        : { left: pct(lines.vBottom), bottom: 0, height: pct(1 - lines.h), transition: glide };
+    return (
+      <div
+        role="slider"
+        aria-label={label}
+        aria-orientation={horizontal ? "vertical" : "horizontal"}
+        aria-valuenow={Math.round(lines[key] * (horizontal ? naturalHeight : naturalWidth))}
+        tabIndex={0}
+        className={`group absolute z-20 flex touch-none items-center justify-center outline-none ${
+          horizontal ? "inset-x-0 h-6 -translate-y-1/2 cursor-row-resize" : "w-6 -translate-x-1/2 cursor-col-resize"
+        }`}
+        style={style}
+        {...handlers(key)}
+      >
+        {/* the line */}
+        <div
+          className={`${horizontal ? "h-[2px] w-full" : "h-full w-[2px]"} transition-[box-shadow] duration-300`}
+          style={{
+            background: color,
+            boxShadow: isActive
+              ? `0 0 0 1px rgba(255,255,255,.9), 0 0 14px 2px ${color}`
+              : "0 0 0 1px rgba(255,255,255,.75)",
+          }}
+        />
+        {/* the grip */}
+        <div
+          className={`absolute rounded-full border-2 border-white shadow-lg transition-transform duration-300 ease-[cubic-bezier(.22,1,.36,1)] group-hover:scale-125 group-focus-visible:scale-125 ${
+            horizontal ? "left-1/2 h-3.5 w-11 -translate-x-1/2" : "top-1/2 h-11 w-3.5 -translate-y-1/2"
+          } ${isActive ? "scale-125" : ""}`}
+          style={{ background: color }}
+        >
+          <div className={`absolute inset-0 m-auto flex items-center justify-center gap-[2px] ${horizontal ? "flex-row" : "flex-col"}`}>
+            {[0, 1, 2].map((d) => (
+              <span key={d} className="h-[3px] w-[3px] rounded-full bg-white/80" />
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div ref={box} className="relative w-full select-none" style={{ aspectRatio: `${naturalWidth} / ${naturalHeight}` }}>
@@ -118,56 +172,18 @@ export default function SplitEditor({ url, naturalWidth, naturalHeight, lines, l
       {quadrants.map((q, i) => (
         <span
           key={i}
-          className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-md bg-black/60 px-2 py-0.5 text-sm font-semibold text-white tabular-nums"
-          style={{ left: pct(q.left), top: pct(q.top) }}
+          className="pointer-events-none absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full bg-black/55 px-2.5 py-0.5 font-mono text-xs font-semibold text-white shadow-lg ring-1 ring-white/25 backdrop-blur-md"
+          style={{ left: pct(q.left), top: pct(q.top), transition: glide }}
         >
           {firstNumber + i}
         </span>
       ))}
 
-      {/* Horizontal line */}
-      <div
-        role="slider"
-        aria-label="Horizontal split"
-        aria-valuenow={Math.round(lines.h * naturalHeight)}
-        tabIndex={0}
-        className={`${lineBase} inset-x-0 h-5 -translate-y-1/2 cursor-row-resize`}
-        style={{ top: pct(lines.h) }}
-        {...handlers("h")}
-      >
-        <div className={`h-0.5 w-full ${active === "h" ? "bg-rose-500" : "bg-sky-500 group-hover:bg-rose-500 group-focus-visible:bg-rose-500"} shadow-[0_0_0_1px_rgba(255,255,255,.8)]`} />
-        <div className="absolute left-1/2 h-4 w-10 -translate-x-1/2 rounded-full border-2 border-white bg-sky-500 shadow group-hover:bg-rose-500" />
-      </div>
+      {cut("h", "Horizontal split")}
+      {cut("vTop", "Vertical split, top row")}
+      {cut("vBottom", "Vertical split, bottom row")}
 
-      {/* Vertical line, top row */}
-      <div
-        role="slider"
-        aria-label="Vertical split, top row"
-        aria-valuenow={Math.round(lines.vTop * naturalWidth)}
-        tabIndex={0}
-        className={`${lineBase} top-0 w-5 -translate-x-1/2 cursor-col-resize`}
-        style={{ left: pct(lines.vTop), height: pct(lines.h) }}
-        {...handlers("vTop")}
-      >
-        <div className={`h-full w-0.5 ${active === "vTop" ? "bg-rose-500" : "bg-amber-500 group-hover:bg-rose-500 group-focus-visible:bg-rose-500"} shadow-[0_0_0_1px_rgba(255,255,255,.8)]`} />
-        <div className="absolute top-1/2 h-10 w-4 -translate-y-1/2 rounded-full border-2 border-white bg-amber-500 shadow group-hover:bg-rose-500" />
-      </div>
-
-      {/* Vertical line, bottom row */}
-      <div
-        role="slider"
-        aria-label="Vertical split, bottom row"
-        aria-valuenow={Math.round(lines.vBottom * naturalWidth)}
-        tabIndex={0}
-        className={`${lineBase} bottom-0 w-5 -translate-x-1/2 cursor-col-resize`}
-        style={{ left: pct(lines.vBottom), height: pct(1 - lines.h) }}
-        {...handlers("vBottom")}
-      >
-        <div className={`h-full w-0.5 ${active === "vBottom" ? "bg-rose-500" : "bg-amber-500 group-hover:bg-rose-500 group-focus-visible:bg-rose-500"} shadow-[0_0_0_1px_rgba(255,255,255,.8)]`} />
-        <div className="absolute top-1/2 h-10 w-4 -translate-y-1/2 rounded-full border-2 border-white bg-amber-500 shadow group-hover:bg-rose-500" />
-      </div>
-
-      {loupeEl}
+      <AnimatePresence>{loupeEl}</AnimatePresence>
     </div>
   );
 }

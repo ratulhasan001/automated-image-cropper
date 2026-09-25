@@ -386,8 +386,7 @@ export async function processTile(img: HTMLImageElement, rect: Rect, o: ProcessO
   const transparent = o.bgMode === "transparent" && o.mime !== "image/jpeg";
   if (o.bgMode !== "keep") cleanBackground(c, o.background, o.bgTolerance, transparent ? "transparent" : "white");
 
-  const bg = o.background;
-  const pad = transparent ? null : o.bgMode === "white" || o.bgMode === "transparent" ? "#fff" : `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+  const pad = transparent ? null : "#fff";
   c = reshape(c, o, pad);
 
   const f = Math.min(1, o.maxW > 0 ? o.maxW / c.width : 1, o.maxH > 0 ? o.maxH / c.height : 1);

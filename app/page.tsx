@@ -8,11 +8,14 @@ import {
   detectLines,
   extensionFor,
   loadImage,
+  outputSize,
   resolveFormat,
   tileRects,
   type Lines,
   type OutputFormat,
+  type ProcessOptions,
   type RGB,
+  type Shape,
 } from "@/lib/image";
 
 type Item = {
@@ -36,6 +39,15 @@ type Settings = {
   prefix: string;
   trim: boolean;
   trimPadding: number;
+  shape: Shape;
+  fit: "pad" | "fill";
+  exactW: number;
+  exactH: number;
+  maxW: number;
+  maxH: number;
+  maxKB: number;
+  bgMode: "keep" | "white" | "transparent";
+  bgTolerance: number;
 };
 
 const DEFAULTS: Settings = {
@@ -47,7 +59,41 @@ const DEFAULTS: Settings = {
   prefix: "",
   trim: false,
   trimPadding: 0,
+  shape: "original",
+  fit: "pad",
+  exactW: 1000,
+  exactH: 1250,
+  maxW: 0,
+  maxH: 0,
+  maxKB: 0,
+  bgMode: "keep",
+  bgTolerance: 60,
 };
+
+/** Output mime for an item — transparent backgrounds can't be JPG, so those become PNG. */
+function mimeFor(s: Settings, fileType: string) {
+  const mime = resolveFormat(s.format, fileType);
+  return s.bgMode === "transparent" && mime === "image/jpeg" ? "image/png" : mime;
+}
+
+function processOptions(s: Settings, item: Item): ProcessOptions {
+  return {
+    mime: mimeFor(s, item.file.type),
+    quality: s.quality,
+    trim: s.trim,
+    trimPadding: s.trimPadding,
+    background: item.background,
+    bgMode: s.bgMode,
+    bgTolerance: s.bgTolerance,
+    shape: s.shape,
+    fit: s.fit,
+    exactW: s.exactW,
+    exactH: s.exactH,
+    maxW: s.maxW,
+    maxH: s.maxH,
+    maxKB: s.maxKB,
+  };
+}
 
 const SETTINGS_KEY = "grid-cropper-settings";
 
@@ -172,14 +218,9 @@ export default function Home() {
       setBusy(`Cropping image ${i + 1} of ${items.length}…`);
       const it = items[i];
       const img = await loadImage(it.url);
-      const mime = resolveFormat(settings.format, it.file.type);
-      const blobs = await cropTiles(img, it.lines, {
-        mime,
-        quality: settings.quality,
-        trim: settings.trim,
-        trimPadding: settings.trimPadding,
-        background: it.background,
-      });
+      const options = processOptions(settings, it);
+      const mime = options.mime;
+      const blobs = await cropTiles(img, it.lines, options);
       for (let t = 0; t < 4; t++) await onTile(fileNameFor(i, t, mime), blobs[t]);
     }
   };
@@ -308,6 +349,7 @@ export default function Home() {
                           index={index}
                           total={items.length}
                           firstNumber={numberLabel(index)}
+                          settings={settings}
                           onLines={(lines) => update(it.id, { lines })}
                           onLinked={(linked) =>
                             update(it.id, {
@@ -385,6 +427,7 @@ function ImageCard({
   index,
   total,
   firstNumber,
+  settings,
   onLines,
   onLinked,
   onReset,
@@ -396,6 +439,7 @@ function ImageCard({
   index: number;
   total: number;
   firstNumber: number;
+  settings: Settings;
   onLines: (l: Lines) => void;
   onLinked: (v: boolean) => void;
   onReset: () => void;
@@ -404,6 +448,49 @@ function ImageCard({
   onApplyAll: () => void;
 }) {
   const rects = tileRects(item.width, item.height, item.lines);
+  const sizes = rects.map((r) => outputSize(r.w, r.h, settings));
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [preview, setPreview] = useState<{ url: string; w: number; h: number; kb: number }[] | null>(null);
+  const previewUrls = useRef<string[]>([]);
+
+  // Re-render the preview (debounced) whenever lines or settings change while it's open.
+  useEffect(() => {
+    if (!previewOpen) return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      const made: string[] = [];
+      const img = await loadImage(item.url);
+      const blobs = await cropTiles(img, item.lines, processOptions(settings, item));
+      const out = await Promise.all(
+        blobs.map(async (b) => {
+          const url = URL.createObjectURL(b);
+          made.push(url);
+          const im = await loadImage(url);
+          return { url, w: im.naturalWidth, h: im.naturalHeight, kb: Math.round(b.size / 1024) };
+        }),
+      );
+      if (cancelled) return made.forEach((u) => URL.revokeObjectURL(u));
+      previewUrls.current.forEach((u) => URL.revokeObjectURL(u));
+      previewUrls.current = made;
+      setPreview(out);
+    }, 350);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [previewOpen, item, settings]);
+
+  // Free preview images when the preview is closed or the card is removed.
+  useEffect(() => {
+    if (previewOpen) return;
+    previewUrls.current.forEach((u) => URL.revokeObjectURL(u));
+    previewUrls.current = [];
+  }, [previewOpen]);
+  useEffect(() => {
+    const urls = previewUrls;
+    return () => urls.current.forEach((u) => URL.revokeObjectURL(u));
+  }, []);
+
   const btn = "rounded-md border border-[var(--line)] px-2 py-1 text-xs hover:bg-[var(--hover)] disabled:opacity-40";
   return (
     <div className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--panel)] shadow-sm">
@@ -413,7 +500,8 @@ function ImageCard({
             Image {index + 1} · <span className="font-normal text-[var(--muted)]">{item.file.name}</span>
           </div>
           <div className="text-xs text-[var(--muted)] tabular-nums">
-            Photos {firstNumber}–{firstNumber + 3} · {rects.map((r) => `${r.w}×${r.h}`).join(", ")}
+            Photos {firstNumber}–{firstNumber + 3} · {sizes.map((r) => `${r.w}×${r.h}`).join(", ")}
+            {settings.trim && " (before trim)"}
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -456,99 +544,207 @@ function ImageCard({
               Apply to all
             </button>
           )}
+          <button
+            className={`${btn} ${previewOpen ? "bg-[var(--accent)] text-white" : ""}`}
+            onClick={() => {
+              setPreviewOpen((v) => !v);
+              setPreview(null);
+            }}
+          >
+            {previewOpen ? "Hide preview" : "Preview output"}
+          </button>
         </div>
       </div>
+      {previewOpen && (
+        <div className="grid grid-cols-4 gap-2 border-t border-[var(--line)] p-2">
+          {preview
+            ? preview.map((p, i) => (
+                <figure key={i} className="flex flex-col gap-1">
+                  <div className="flex aspect-square items-center justify-center overflow-hidden rounded-md bg-[var(--canvas)]">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={p.url} alt={`Photo ${firstNumber + i}`} className="checker max-h-full max-w-full shadow-sm" />
+                  </div>
+                  <figcaption className="text-center text-[11px] leading-tight text-[var(--muted)] tabular-nums">
+                    <b className="text-[var(--text)]">{firstNumber + i}</b> · {p.w}×{p.h}
+                    <br />
+                    <span className={settings.maxKB && p.kb > settings.maxKB ? "font-semibold text-amber-600" : ""}>
+                      {p.kb} KB{settings.maxKB > 0 && p.kb > settings.maxKB && " — over limit"}
+                    </span>
+                  </figcaption>
+                </figure>
+              ))
+            : <p className="col-span-4 py-6 text-center text-sm text-[var(--muted)]">Rendering…</p>}
+        </div>
+      )}
     </div>
   );
 }
 
 function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (p: Partial<Settings>) => void }) {
-  const field = "rounded-md border border-[var(--line)] bg-[var(--canvas)] px-2 py-1 text-sm";
+  const field = "w-full rounded-md border border-[var(--line)] bg-[var(--canvas)] px-2 py-1 text-sm text-[var(--text)]";
   const label = "flex flex-col gap-1 text-xs font-medium text-[var(--muted)]";
+  const group = "flex flex-col gap-3 rounded-lg border border-[var(--line)] p-3";
+  const heading = "text-xs font-semibold uppercase tracking-wide text-[var(--text)]";
+  const int = (v: string) => Math.max(0, parseInt(v) || 0);
+  const lossy = settings.format === "image/jpeg" || settings.format === "image/webp" || settings.format === "original";
+  const presets = [
+    { label: "Original", shape: "original" },
+    { label: "1:1", shape: "1:1" },
+    { label: "4:5", shape: "4:5" },
+    { label: "3:4", shape: "3:4" },
+    { label: "2:3", shape: "2:3" },
+    { label: "Exact size", shape: "exact" },
+  ] as const;
+
   return (
     <details className="rounded-xl border border-[var(--line)] bg-[var(--panel)]" open>
       <summary className="cursor-pointer px-4 py-3 text-sm font-semibold">Output settings</summary>
-      <div className="grid grid-cols-2 gap-4 px-4 pb-4 sm:grid-cols-3 lg:grid-cols-6">
-        <label className={label}>
-          Naming
-          <select
-            className={field}
-            value={settings.layout}
-            onChange={(e) => onChange({ layout: e.target.value as Settings["layout"] })}
-          >
-            <option value="flat">One folder: 1, 2, 3 … (continuous)</option>
-            <option value="folders">Folder per product: 1–8 each</option>
-          </select>
-        </label>
-        <label className={label}>
-          {settings.layout === "folders" ? "First product number" : "Start numbering at"}
-          <input
-            type="number"
-            min={0}
-            className={field}
-            value={settings.startNumber}
-            onChange={(e) => onChange({ startNumber: Math.max(0, parseInt(e.target.value) || 0) })}
-          />
-        </label>
-        <label className={label}>
-          Images per product
-          <input
-            type="number"
-            min={1}
-            className={field}
-            value={settings.perProduct}
-            onChange={(e) => onChange({ perProduct: Math.max(1, parseInt(e.target.value) || 1) })}
-          />
-        </label>
-        <label className={label}>
-          Filename prefix
-          <input
-            className={field}
-            placeholder="e.g. jacket-"
-            value={settings.prefix}
-            onChange={(e) => onChange({ prefix: e.target.value.replace(/[\\/:*?"<>|]/g, "") })}
-          />
-        </label>
-        <label className={label}>
-          Format
-          <select
-            className={field}
-            value={settings.format}
-            onChange={(e) => onChange({ format: e.target.value as OutputFormat })}
-          >
-            <option value="original">Same as original</option>
-            <option value="image/png">PNG (lossless)</option>
-            <option value="image/jpeg">JPG</option>
-            <option value="image/webp">WebP</option>
-          </select>
-        </label>
-        <label className={label}>
-          Quality (JPG/WebP): {Math.round(settings.quality * 100)}
-          <input
-            type="range"
-            min={50}
-            max={100}
-            value={Math.round(settings.quality * 100)}
-            onChange={(e) => onChange({ quality: parseInt(e.target.value) / 100 })}
-          />
-        </label>
-        <label className="col-span-2 flex items-center gap-2 text-sm sm:col-span-3">
-          <input type="checkbox" checked={settings.trim} onChange={(e) => onChange({ trim: e.target.checked })} />
-          Auto-trim empty background around each photo
-          {settings.trim && (
-            <span className="flex items-center gap-1 text-xs text-[var(--muted)]">
-              · padding
-              <input
-                type="number"
-                min={0}
-                className={`${field} w-16`}
-                value={settings.trimPadding}
-                onChange={(e) => onChange({ trimPadding: Math.max(0, parseInt(e.target.value) || 0) })}
-              />
-              px
-            </span>
+      <div className="grid gap-3 px-4 pb-4 md:grid-cols-2 xl:grid-cols-4">
+        {/* Naming */}
+        <div className={group}>
+          <div className={heading}>Naming</div>
+          <label className={label}>
+            Layout
+            <select className={field} value={settings.layout} onChange={(e) => onChange({ layout: e.target.value as Settings["layout"] })}>
+              <option value="flat">One folder: 1, 2, 3 … (continuous)</option>
+              <option value="folders">Folder per product: 1–8 each</option>
+            </select>
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <label className={label}>
+              {settings.layout === "folders" ? "First product #" : "Start at"}
+              <input type="number" min={0} className={field} value={settings.startNumber} onChange={(e) => onChange({ startNumber: int(e.target.value) })} />
+            </label>
+            <label className={label}>
+              Images / product
+              <input type="number" min={1} className={field} value={settings.perProduct} onChange={(e) => onChange({ perProduct: Math.max(1, int(e.target.value)) })} />
+            </label>
+          </div>
+          <label className={label}>
+            Filename prefix
+            <input className={field} placeholder="e.g. jacket-" value={settings.prefix} onChange={(e) => onChange({ prefix: e.target.value.replace(/[\\/:*?"<>|]/g, "") })} />
+          </label>
+        </div>
+
+        {/* Size & shape */}
+        <div className={group}>
+          <div className={heading}>Size &amp; shape</div>
+          <div className="flex flex-wrap gap-1">
+            {presets.map((p) => (
+              <button
+                key={p.shape}
+                onClick={() => onChange({ shape: p.shape })}
+                className={`rounded-md border px-2 py-1 text-xs ${
+                  settings.shape === p.shape ? "border-[var(--accent)] bg-[var(--accent)] text-white" : "border-[var(--line)] hover:bg-[var(--hover)]"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          {settings.shape === "exact" && (
+            <div className="grid grid-cols-2 gap-2">
+              <label className={label}>
+                Width px
+                <input type="number" min={1} className={field} value={settings.exactW} onChange={(e) => onChange({ exactW: Math.max(1, int(e.target.value)) })} />
+              </label>
+              <label className={label}>
+                Height px
+                <input type="number" min={1} className={field} value={settings.exactH} onChange={(e) => onChange({ exactH: Math.max(1, int(e.target.value)) })} />
+              </label>
+            </div>
           )}
-        </label>
+          {settings.shape !== "original" && (
+            <label className={label}>
+              How to fit
+              <select className={field} value={settings.fit} onChange={(e) => onChange({ fit: e.target.value as Settings["fit"] })}>
+                <option value="pad">Pad with background (keeps whole photo)</option>
+                <option value="fill">Fill frame (crops edges)</option>
+              </select>
+            </label>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            <label className={label}>
+              Max width px
+              <input type="number" min={0} placeholder="no limit" className={field} value={settings.maxW || ""} onChange={(e) => onChange({ maxW: int(e.target.value) })} />
+            </label>
+            <label className={label}>
+              Max height px
+              <input type="number" min={0} placeholder="no limit" className={field} value={settings.maxH || ""} onChange={(e) => onChange({ maxH: int(e.target.value) })} />
+            </label>
+          </div>
+        </div>
+
+        {/* Background */}
+        <div className={group}>
+          <div className={heading}>Background</div>
+          <div className="flex flex-col gap-1.5 text-sm">
+            {(
+              [
+                ["keep", "Keep as is"],
+                ["white", "Pure white (#FFFFFF)"],
+                ["transparent", "Transparent (PNG/WebP)"],
+              ] as const
+            ).map(([v, l]) => (
+              <label key={v} className="flex items-center gap-2">
+                <input type="radio" name="bgMode" checked={settings.bgMode === v} onChange={() => onChange({ bgMode: v })} />
+                {l}
+              </label>
+            ))}
+          </div>
+          {settings.bgMode !== "keep" && (
+            <label className={label}>
+              Strength: {settings.bgTolerance}
+              <input type="range" min={10} max={160} value={settings.bgTolerance} onChange={(e) => onChange({ bgTolerance: parseInt(e.target.value) })} />
+              <span className="font-normal">Raise it if grey shadows remain, lower it if the product edges get eaten. Use Preview to check.</span>
+            </label>
+          )}
+          {settings.bgMode === "transparent" && (settings.format === "image/jpeg" || settings.format === "original") && (
+            <p className="text-xs text-amber-600">JPG can&apos;t be transparent, so JPG photos will be saved as PNG.</p>
+          )}
+          <label className="flex flex-wrap items-center gap-2 text-sm">
+            <input type="checkbox" checked={settings.trim} onChange={(e) => onChange({ trim: e.target.checked })} />
+            Auto-trim empty space
+            {settings.trim && (
+              <span className="flex items-center gap-1 text-xs text-[var(--muted)]">
+                padding
+                <input type="number" min={0} className={`${field} w-16`} value={settings.trimPadding} onChange={(e) => onChange({ trimPadding: int(e.target.value) })} />
+                px
+              </span>
+            )}
+          </label>
+        </div>
+
+        {/* Format & file size */}
+        <div className={group}>
+          <div className={heading}>Format &amp; file size</div>
+          <label className={label}>
+            Format
+            <select className={field} value={settings.format} onChange={(e) => onChange({ format: e.target.value as OutputFormat })}>
+              <option value="original">Same as original</option>
+              <option value="image/png">PNG (lossless)</option>
+              <option value="image/jpeg">JPG</option>
+              <option value="image/webp">WebP</option>
+            </select>
+          </label>
+          {lossy && (
+            <label className={label}>
+              Quality (JPG/WebP): {Math.round(settings.quality * 100)}
+              <input type="range" min={50} max={100} value={Math.round(settings.quality * 100)} onChange={(e) => onChange({ quality: parseInt(e.target.value) / 100 })} />
+            </label>
+          )}
+          <label className={label}>
+            Max file size per photo (KB)
+            <input type="number" min={0} placeholder="no limit" className={field} value={settings.maxKB || ""} onChange={(e) => onChange({ maxKB: int(e.target.value) })} />
+            <span className="font-normal">
+              {settings.shape === "exact"
+                ? "Exact size is kept, so only quality is lowered (use JPG/WebP for small files)."
+                : settings.format === "image/png"
+                  ? "PNG is lossless, so it's made smaller by reducing dimensions."
+                  : "Lowers quality first, then dimensions if still too big."}
+            </span>
+          </label>
+        </div>
       </div>
     </details>
   );

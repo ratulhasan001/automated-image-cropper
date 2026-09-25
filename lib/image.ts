@@ -209,31 +209,196 @@ export function extensionFor(mime: string) {
   return mime === "image/jpeg" ? "jpg" : mime === "image/webp" ? "webp" : "png";
 }
 
-export type CropOptions = {
+export type Shape = "original" | "1:1" | "4:5" | "3:4" | "2:3" | "exact";
+
+export type ProcessOptions = {
   mime: string;
   quality: number; // 0..1, jpeg/webp only
   trim: boolean;
   trimPadding: number;
-  background: RGB;
+  background: RGB; // detected background colour of the source image
+  bgMode: "keep" | "white" | "transparent";
+  bgTolerance: number; // colour distance (sum of RGB differences) still treated as background
+  shape: Shape;
+  fit: "pad" | "fill"; // pad = add background around, fill = crop edges
+  exactW: number;
+  exactH: number;
+  maxW: number; // 0 = no limit
+  maxH: number;
+  maxKB: number; // 0 = no limit
 };
 
-export async function cropTiles(img: HTMLImageElement, lines: Lines, o: CropOptions): Promise<Blob[]> {
+type Canvas = HTMLCanvasElement;
+
+function makeCanvas(w: number, h: number): [Canvas, CanvasRenderingContext2D] {
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(w));
+  c.height = Math.max(1, Math.round(h));
+  const ctx = c.getContext("2d", { willReadFrequently: true })!;
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  return [c, ctx];
+}
+
+/** Canvas size before any max-size limit is applied. */
+export function shapedSize(w: number, h: number, o: Pick<ProcessOptions, "shape" | "fit" | "exactW" | "exactH">) {
+  if (o.shape === "original") return { w, h };
+  if (o.shape === "exact") return { w: Math.max(1, o.exactW), h: Math.max(1, o.exactH) };
+  const [a, b] = o.shape.split(":").map(Number);
+  const R = a / b;
+  const wider = w / h > R;
+  if (o.fit === "pad") return wider ? { w, h: Math.round(w / R) } : { w: Math.round(h * R), h };
+  return wider ? { w: Math.round(h * R), h } : { w, h: Math.round(w / R) };
+}
+
+/** Final pixel size of a tile (ignores auto-trim and file-size shrinking). */
+export function outputSize(w: number, h: number, o: Pick<ProcessOptions, "shape" | "fit" | "exactW" | "exactH" | "maxW" | "maxH">) {
+  const s = shapedSize(w, h, o);
+  const f = Math.min(1, o.maxW > 0 ? o.maxW / s.w : 1, o.maxH > 0 ? o.maxH / s.h : 1);
+  return { w: Math.max(1, Math.round(s.w * f)), h: Math.max(1, Math.round(s.h * f)) };
+}
+
+/**
+ * Background cleanup: flood-fills from the tile edges through background-coloured pixels,
+ * so white clothing inside the product is never touched. Edge pixels are blended for a soft outline.
+ */
+function cleanBackground(c: Canvas, bg: RGB, tol: number, mode: "white" | "transparent") {
+  const ctx = c.getContext("2d", { willReadFrequently: true })!;
+  const w = c.width, h = c.height;
+  const img = ctx.getImageData(0, 0, w, h);
+  const d = img.data;
+  const dist = (p: number) => {
+    const i = p * 4;
+    if (d[i + 3] < 16) return 0;
+    return Math.abs(d[i] - bg[0]) + Math.abs(d[i + 1] - bg[1]) + Math.abs(d[i + 2] - bg[2]);
+  };
+  const seen = new Uint8Array(w * h);
+  const stack = new Int32Array(w * h);
+  let sp = 0;
+  const visit = (p: number) => {
+    if (!seen[p] && dist(p) <= tol) {
+      seen[p] = 1;
+      stack[sp++] = p;
+    }
+  };
+  for (let x = 0; x < w; x++) { visit(x); visit((h - 1) * w + x); }
+  for (let y = 0; y < h; y++) { visit(y * w); visit(y * w + w - 1); }
+  while (sp > 0) {
+    const p = stack[--sp];
+    const x = p % w;
+    if (x > 0) visit(p - 1);
+    if (x < w - 1) visit(p + 1);
+    if (p >= w) visit(p - w);
+    if (p < w * (h - 1)) visit(p + w);
+  }
+  for (let p = 0; p < w * h; p++) {
+    if (!seen[p]) continue;
+    const t = dist(p) / Math.max(1, tol);
+    const keep = t < 0.5 ? 0 : (t - 0.5) / 0.5; // 0 = pure background, 1 = original pixel
+    const i = p * 4;
+    if (mode === "transparent") {
+      d[i + 3] = Math.round(d[i + 3] * keep);
+    } else {
+      d[i] = Math.round(d[i] * keep + 255 * (1 - keep));
+      d[i + 1] = Math.round(d[i + 1] * keep + 255 * (1 - keep));
+      d[i + 2] = Math.round(d[i + 2] * keep + 255 * (1 - keep));
+      d[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+/** High-quality resize (halves in steps for big reductions to avoid aliasing). */
+function resize(src: Canvas, w: number, h: number): Canvas {
+  let cur = src;
+  while (cur.width / 2 >= w && cur.height / 2 >= h) {
+    const [c, ctx] = makeCanvas(cur.width / 2, cur.height / 2);
+    ctx.drawImage(cur, 0, 0, c.width, c.height);
+    cur = c;
+  }
+  if (cur.width === Math.round(w) && cur.height === Math.round(h)) return cur;
+  const [c, ctx] = makeCanvas(w, h);
+  ctx.drawImage(cur, 0, 0, c.width, c.height);
+  return c;
+}
+
+function reshape(src: Canvas, o: ProcessOptions, pad: string | null): Canvas {
+  if (o.shape === "original") return src;
+  const w = src.width, h = src.height;
+  const t = shapedSize(w, h, o);
+  const scale = o.fit === "pad" ? Math.min(t.w / w, t.h / h) : Math.max(t.w / w, t.h / h);
+  const dw = w * scale, dh = h * scale;
+  const scaled = scale < 1 ? resize(src, dw, dh) : src;
+  const [c, ctx] = makeCanvas(t.w, t.h);
+  if (pad) {
+    ctx.fillStyle = pad;
+    ctx.fillRect(0, 0, c.width, c.height);
+  }
+  ctx.drawImage(scaled, (t.w - dw) / 2, (t.h - dh) / 2, dw, dh);
+  return c;
+}
+
+function toBlob(c: Canvas, mime: string, quality: number): Promise<Blob> {
+  let src = c;
+  if (mime === "image/jpeg") {
+    // JPG has no transparency — flatten onto white instead of black.
+    const [f, ctx] = makeCanvas(c.width, c.height);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, f.width, f.height);
+    ctx.drawImage(c, 0, 0);
+    src = f;
+  }
+  return new Promise((res, rej) => src.toBlob((b) => (b ? res(b) : rej(new Error("Failed to encode image"))), mime, quality));
+}
+
+/** Encode, lowering quality (JPG/WebP) and then dimensions until under the size limit. */
+async function encode(c: Canvas, o: ProcessOptions): Promise<Blob> {
+  const limit = o.maxKB * 1024;
+  let blob = await toBlob(c, o.mime, o.quality);
+  if (!limit || blob.size <= limit) return blob;
+  const lossy = o.mime !== "image/png";
+  let q = o.quality;
+  if (lossy) {
+    let lo = 0.4, hi = o.quality, best: Blob | null = null;
+    for (let i = 0; i < 7; i++) {
+      const mid = (lo + hi) / 2;
+      const b = await toBlob(c, o.mime, mid);
+      if (b.size <= limit) { best = b; lo = mid; } else hi = mid;
+    }
+    if (best) return best;
+    q = 0.4;
+    blob = await toBlob(c, o.mime, q);
+  }
+  if (o.shape === "exact") return blob; // exact dimensions win over the file-size limit
+  let cur = c;
+  for (let i = 0; i < 20 && blob.size > limit && cur.width > 64; i++) {
+    cur = resize(cur, cur.width * 0.85, cur.height * 0.85);
+    blob = await toBlob(cur, o.mime, q);
+  }
+  return blob;
+}
+
+export async function processTile(img: HTMLImageElement, rect: Rect, o: ProcessOptions): Promise<Blob> {
+  const r = o.trim ? trimRect(img, rect, o.background, o.trimPadding) : rect;
+  let [c, ctx] = makeCanvas(r.w, r.h);
+  ctx.drawImage(img, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+
+  const transparent = o.bgMode === "transparent" && o.mime !== "image/jpeg";
+  if (o.bgMode !== "keep") cleanBackground(c, o.background, o.bgTolerance, transparent ? "transparent" : "white");
+
+  const bg = o.background;
+  const pad = transparent ? null : o.bgMode === "white" || o.bgMode === "transparent" ? "#fff" : `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+  c = reshape(c, o, pad);
+
+  const f = Math.min(1, o.maxW > 0 ? o.maxW / c.width : 1, o.maxH > 0 ? o.maxH / c.height : 1);
+  if (f < 1) c = resize(c, c.width * f, c.height * f);
+
+  return encode(c, o);
+}
+
+export async function cropTiles(img: HTMLImageElement, lines: Lines, o: ProcessOptions): Promise<Blob[]> {
   const rects = tileRects(img.naturalWidth, img.naturalHeight, lines);
   const blobs: Blob[] = [];
-  for (const base of rects) {
-    const r = o.trim ? trimRect(img, base, o.background, o.trimPadding) : base;
-    const c = document.createElement("canvas");
-    c.width = r.w;
-    c.height = r.h;
-    const ctx = c.getContext("2d")!;
-    if (o.mime === "image/jpeg") {
-      ctx.fillStyle = "#fff";
-      ctx.fillRect(0, 0, r.w, r.h);
-    }
-    ctx.drawImage(img, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
-    const blob = await new Promise<Blob | null>((res) => c.toBlob(res, o.mime, o.quality));
-    if (!blob) throw new Error("Failed to encode image");
-    blobs.push(blob);
-  }
+  for (const r of rects) blobs.push(await processTile(img, r, o));
   return blobs;
 }

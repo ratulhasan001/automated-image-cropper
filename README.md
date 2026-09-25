@@ -1,4 +1,4 @@
-# 2×2 Grid Cropper
+# Yo-Yo Cropper
 
 Split 2×2 grid product images into 4 separate photos. Runs 100% in the browser (no uploads, no server costs).
 

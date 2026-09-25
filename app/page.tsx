@@ -250,15 +250,14 @@ export default function Home() {
         </header>
 
         <main className="mx-auto max-w-7xl px-4">
-          <AnimatePresence mode="wait" initial={false}>
-            {!hasItems ? (
-              <motion.div key="empty" exit={{ opacity: 0, y: -16, transition: { duration: 0.25 } }}>
-                <Hero onPick={pick} active={dragOver} />
-              </motion.div>
-            ) : (
-              <motion.div key="work" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="pt-6" />
-            )}
-          </AnimatePresence>
+          {/* Plain conditional (no exit tracking) so the hero can never get stuck mid-transition. */}
+          {!hasItems ? (
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <Hero onPick={pick} active={dragOver} />
+            </motion.div>
+          ) : (
+            <div className="pt-6" />
+          )}
 
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -380,19 +379,22 @@ export default function Home() {
                   <Button onClick={downloadFiles} disabled={!!busy} title="Each photo as a separate file (browser may ask to allow multiple downloads)">
                     <Download /> <span className="hidden sm:inline">Files</span>
                   </Button>
-                  <Button variant="primary" onClick={downloadZip} disabled={!!busy} busy={!!busy} className="min-w-44">
-                    <AnimatePresence mode="wait" initial={false}>
-                      <motion.span
-                        key={busy?.label ?? "idle"}
-                        initial={{ opacity: 0, y: 8 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -8 }}
-                        transition={{ duration: 0.18 }}
-                        className="flex items-center gap-1.5"
-                      >
-                        {busy ? busy.label + "…" : <><Zap /> Crop &amp; download ZIP</>}
-                      </motion.span>
-                    </AnimatePresence>
+                  <Button variant="primary" onClick={downloadZip} disabled={!!busy} busy={!!busy} className="relative min-w-48">
+                    {/* Both labels stay mounted and crossfade — label text can change many times a second while busy. */}
+                    {/* Plain CSS transitions: the browser always completes them, even if the tab was in the background. */}
+                    <span
+                      className={`flex items-center gap-1.5 transition-all duration-200 ${busy ? "-translate-y-2 opacity-0" : "opacity-100"}`}
+                    >
+                      <Zap /> Crop &amp; download ZIP
+                    </span>
+                    <span
+                      className={`absolute inset-0 flex items-center justify-center tabular-nums transition-all duration-200 ${
+                        busy ? "opacity-100" : "translate-y-2 opacity-0"
+                      }`}
+                      aria-hidden={!busy}
+                    >
+                      {busy ? `${busy.label}…` : ""}
+                    </span>
                   </Button>
                 </div>
                 {/* progress */}
@@ -475,18 +477,16 @@ export default function Home() {
 function Stat({ value, label }: { value: number; label: string }) {
   return (
     <span className="flex items-baseline gap-1">
-      <AnimatePresence mode="popLayout" initial={false}>
-        <motion.b
-          key={value}
-          initial={{ y: 10, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          exit={{ y: -10, opacity: 0 }}
-          transition={spring}
-          className="font-mono text-base tabular-nums"
-        >
-          {value}
-        </motion.b>
-      </AnimatePresence>
+      {/* Re-keying replays the entrance on every change; no exit animation to get stuck. */}
+      <motion.b
+        key={value}
+        initial={{ y: 6, opacity: 0.3 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={spring}
+        className="font-mono text-base tabular-nums"
+      >
+        {value}
+      </motion.b>
       <span className="text-xs text-[var(--muted)]">{label}</span>
     </span>
   );

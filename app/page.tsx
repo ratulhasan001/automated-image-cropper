@@ -1,101 +1,15 @@
 "use client";
 
+import { AnimatePresence, LayoutGroup, motion, MotionConfig } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import JSZip from "jszip";
-import SplitEditor from "@/components/SplitEditor";
-import {
-  cropTiles,
-  detectLines,
-  extensionFor,
-  loadImage,
-  outputSize,
-  resolveFormat,
-  tileRects,
-  type Lines,
-  type OutputFormat,
-  type ProcessOptions,
-  type RGB,
-  type Shape,
-} from "@/lib/image";
-
-type Item = {
-  id: string;
-  file: File;
-  url: string;
-  width: number;
-  height: number;
-  lines: Lines;
-  detected: Lines;
-  background: RGB;
-  linked: boolean;
-};
-
-type Settings = {
-  startNumber: number;
-  perProduct: number;
-  layout: "flat" | "folders";
-  format: OutputFormat;
-  quality: number;
-  prefix: string;
-  trim: boolean;
-  trimPadding: number;
-  shape: Shape;
-  fit: "pad" | "fill";
-  exactW: number;
-  exactH: number;
-  maxW: number;
-  maxH: number;
-  maxKB: number;
-  bgMode: "keep" | "white" | "transparent";
-  bgTolerance: number;
-};
-
-const DEFAULTS: Settings = {
-  startNumber: 1,
-  perProduct: 2,
-  layout: "folders",
-  format: "original",
-  quality: 0.92,
-  prefix: "",
-  trim: false,
-  trimPadding: 0,
-  shape: "exact",
-  fit: "pad",
-  exactW: 1000,
-  exactH: 1250,
-  maxW: 0,
-  maxH: 0,
-  maxKB: 0,
-  bgMode: "keep",
-  bgTolerance: 60,
-};
-
-/** Output mime for an item — transparent backgrounds can't be JPG, so those become PNG. */
-function mimeFor(s: Settings, fileType: string) {
-  const mime = resolveFormat(s.format, fileType);
-  return s.bgMode === "transparent" && mime === "image/jpeg" ? "image/png" : mime;
-}
-
-function processOptions(s: Settings, item: Item): ProcessOptions {
-  return {
-    mime: mimeFor(s, item.file.type),
-    quality: s.quality,
-    trim: s.trim,
-    trimPadding: s.trimPadding,
-    background: item.background,
-    bgMode: s.bgMode,
-    bgTolerance: s.bgTolerance,
-    shape: s.shape,
-    fit: s.fit,
-    exactW: s.exactW,
-    exactH: s.exactH,
-    maxW: s.maxW,
-    maxH: s.maxH,
-    maxKB: s.maxKB,
-  };
-}
-
-const SETTINGS_KEY = "grid-cropper-settings";
+import ImageCard from "@/components/ImageCard";
+import Logo from "@/components/Logo";
+import SettingsPanel from "@/components/SettingsPanel";
+import { Button, softSpring, spring } from "@/components/ui";
+import { Check, Download, Grid, Plus, Shield, Trash, Upload, Zap } from "@/components/icons";
+import { cropTiles, detectLines, extensionFor, loadImage } from "@/lib/image";
+import { APP_NAME, DEFAULTS, processOptions, SETTINGS_KEY, type Item, type Settings } from "@/lib/settings";
 
 const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }).compare;
 
@@ -109,12 +23,16 @@ function triggerDownload(blob: Blob, name: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
 }
 
+type Busy = { label: string; progress: number | null };
+
 export default function Home() {
   const [items, setItems] = useState<Item[]>([]);
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
-  const [busy, setBusy] = useState<string | null>(null);
+  const [busy, setBusy] = useState<Busy | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dragDepth = useRef(0);
 
   useEffect(() => {
     try {
@@ -122,6 +40,12 @@ export default function Home() {
       if (saved) setSettings({ ...DEFAULTS, ...JSON.parse(saved) });
     } catch {}
   }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   const updateSettings = (patch: Partial<Settings>) => {
     setSettings((s) => {
@@ -138,14 +62,14 @@ export default function Home() {
       .filter((f) => f.type.startsWith("image/"))
       .sort((a, b) => naturalCompare(a.name, b.name));
     if (!files.length) return;
-    setBusy(`Analysing ${files.length} image${files.length > 1 ? "s" : ""}…`);
-    const added: Item[] = [];
-    for (const file of files) {
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      setBusy({ label: `Analysing ${i + 1} of ${files.length}`, progress: i / files.length });
       const url = URL.createObjectURL(file);
       try {
         const img = await loadImage(url);
         const { lines, background } = detectLines(img);
-        added.push({
+        const item: Item = {
           id: crypto.randomUUID(),
           file,
           url,
@@ -155,12 +79,13 @@ export default function Home() {
           detected: lines,
           background,
           linked: false,
-        });
+        };
+        // Add one at a time so cards cascade in.
+        setItems((prev) => [...prev, item]);
       } catch {
         URL.revokeObjectURL(url);
       }
     }
-    setItems((prev) => [...prev, ...added]);
     setBusy(null);
   }, []);
 
@@ -180,7 +105,7 @@ export default function Home() {
   const remove = (id: string) =>
     setItems((prev) => {
       const it = prev.find((p) => p.id === id);
-      if (it) URL.revokeObjectURL(it.url);
+      if (it) setTimeout(() => URL.revokeObjectURL(it.url), 1000); // after exit animation
       return prev.filter((p) => p.id !== id);
     });
 
@@ -197,7 +122,8 @@ export default function Home() {
     setItems((prev) => prev.map((it) => ({ ...it, lines: { ...source.lines }, linked: source.linked })));
 
   const clearAll = () => {
-    items.forEach((it) => URL.revokeObjectURL(it.url));
+    const urls = items.map((it) => it.url);
+    setTimeout(() => urls.forEach((u) => URL.revokeObjectURL(u)), 1000);
     setItems([]);
   };
 
@@ -215,13 +141,12 @@ export default function Home() {
 
   const produce = async (onTile: (name: string, blob: Blob) => Promise<void> | void) => {
     for (let i = 0; i < items.length; i++) {
-      setBusy(`Cropping image ${i + 1} of ${items.length}…`);
+      setBusy({ label: `Cropping ${i + 1} of ${items.length}`, progress: i / items.length });
       const it = items[i];
       const img = await loadImage(it.url);
       const options = processOptions(settings, it);
-      const mime = options.mime;
       const blobs = await cropTiles(img, it.lines, options);
-      for (let t = 0; t < 4; t++) await onTile(fileNameFor(i, t, mime), blobs[t]);
+      for (let t = 0; t < 4; t++) await onTile(fileNameFor(i, t, options.mime), blobs[t]);
     }
   };
 
@@ -231,12 +156,13 @@ export default function Home() {
       await produce((name, blob) => {
         zip.file(name, blob);
       });
-      setBusy("Building ZIP…");
+      setBusy({ label: "Packing ZIP", progress: 1 });
       const out = await zip.generateAsync({ type: "blob", compression: "STORE" });
       const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-      triggerDownload(out, `cropped-${stamp}.zip`);
+      triggerDownload(out, `yoyo-cropper-${stamp}.zip`);
+      setToast(`${items.length * 4} photos downloaded as ZIP`);
     } catch (e) {
-      alert(`Something went wrong: ${(e as Error).message}`);
+      setToast(`Something went wrong: ${(e as Error).message}`);
     } finally {
       setBusy(null);
     }
@@ -248,8 +174,9 @@ export default function Home() {
         triggerDownload(blob, name.replace("/", "_"));
         await new Promise((r) => setTimeout(r, 150));
       });
+      setToast(`${items.length * 4} photos downloaded`);
     } catch (e) {
-      alert(`Something went wrong: ${(e as Error).message}`);
+      setToast(`Something went wrong: ${(e as Error).message}`);
     } finally {
       setBusy(null);
     }
@@ -263,36 +190,52 @@ export default function Home() {
     return settings.startNumber + imageIndex * 4;
   };
 
+  const pick = () => inputRef.current?.click();
+  const hasItems = items.length > 0;
+
   return (
-    <div
-      className="min-h-screen pb-28"
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDragOver(true);
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setDragOver(false);
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        setDragOver(false);
-        addFiles(e.dataTransfer.files);
-      }}
-    >
-      <header className="border-b border-[var(--line)] bg-[var(--panel)]">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 py-4">
-          <div>
-            <h1 className="text-xl font-bold tracking-tight">2×2 Grid Cropper</h1>
-            <p className="text-sm text-[var(--muted)]">
-              Split grid images into 4 separate photos. Everything runs in your browser — nothing is uploaded.
-            </p>
+    <MotionConfig reducedMotion="user">
+      <div
+        className="min-h-screen pb-36"
+        onDragEnter={(e) => {
+          if (!e.dataTransfer.types.includes("Files")) return;
+          dragDepth.current++;
+          setDragOver(true);
+        }}
+        onDragOver={(e) => e.preventDefault()}
+        onDragLeave={() => {
+          dragDepth.current = Math.max(0, dragDepth.current - 1);
+          if (dragDepth.current === 0) setDragOver(false);
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          dragDepth.current = 0;
+          setDragOver(false);
+          addFiles(e.dataTransfer.files);
+        }}
+      >
+        <div className="ambient" aria-hidden>
+          <div className="blob blob-1" />
+          <div className="blob blob-2" />
+          <div className="blob blob-3" />
+        </div>
+
+        {/* Header */}
+        <header className="sticky top-0 z-40 border-b border-[var(--line)] bg-[var(--bg)]/60 backdrop-blur-xl">
+          <div className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4">
+            <a href="/" className="flex items-center gap-2.5">
+              <Logo size={30} />
+              <span className="text-[15px] font-semibold tracking-tight">{APP_NAME}</span>
+            </a>
+            <div className="flex items-center gap-3">
+              <span className="hidden items-center gap-1.5 rounded-full border border-[var(--line)] px-3 py-1 text-xs text-[var(--muted)] sm:flex">
+                <Shield size={13} /> Private · runs in your browser
+              </span>
+              <Button variant="primary" onClick={pick}>
+                <Plus /> Add images
+              </Button>
+            </div>
           </div>
-          <button
-            onClick={() => inputRef.current?.click()}
-            className="rounded-lg bg-[var(--accent)] px-4 py-2 font-semibold text-white hover:opacity-90"
-          >
-            + Add images
-          </button>
           <input
             ref={inputRef}
             type="file"
@@ -304,448 +247,393 @@ export default function Home() {
               e.target.value = "";
             }}
           />
-        </div>
-      </header>
+        </header>
 
-      <main className="mx-auto max-w-7xl px-4 py-6">
-        <SettingsPanel settings={settings} onChange={updateSettings} />
-
-        {items.length === 0 ? (
-          <button
-            onClick={() => inputRef.current?.click()}
-            className={`mt-6 flex w-full flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed px-6 py-24 text-center transition ${
-              dragOver ? "border-[var(--accent)] bg-[var(--accent-soft)]" : "border-[var(--line)] hover:border-[var(--accent)]"
-            }`}
-          >
-            <span className="text-lg font-semibold">Drop your 2×2 grid images here</span>
-            <span className="text-sm text-[var(--muted)]">
-              or click to choose files · you can also paste (⌘/Ctrl + V) · files are sorted by name
-            </span>
-          </button>
-        ) : (
-          <>
-            <p className="mt-6 text-sm text-[var(--muted)]">
-              Drag the <span className="font-semibold text-sky-600">blue</span> line to move the horizontal cut and the{" "}
-              <span className="font-semibold text-amber-600">orange</span> lines for the vertical cuts (top and bottom rows are
-              independent). Click a line and use arrow keys to nudge 1px (Shift = 10px). A magnifier appears while dragging.
-            </p>
-            <div className="mt-4 space-y-8">
-              {products.map((group, p) => (
-                <section key={p}>
-                  <h2 className="mb-3 flex items-baseline gap-3 text-base font-semibold">
-                    Product {settings.layout === "folders" ? p + settings.startNumber : p + 1}
-                    <span className="text-sm font-normal text-[var(--muted)]">
-                      {group.length * 4} photos
-                      {group.length < settings.perProduct && " · incomplete"}
-                    </span>
-                  </h2>
-                  <div className="grid gap-5 md:grid-cols-2">
-                    {group.map((it, k) => {
-                      const index = p * settings.perProduct + k;
-                      return (
-                        <ImageCard
-                          key={it.id}
-                          item={it}
-                          index={index}
-                          total={items.length}
-                          firstNumber={numberLabel(index)}
-                          settings={settings}
-                          onLines={(lines) => update(it.id, { lines })}
-                          onLinked={(linked) =>
-                            update(it.id, {
-                              linked,
-                              lines: linked ? { ...it.lines, vBottom: it.lines.vTop } : it.lines,
-                            })
-                          }
-                          onReset={() => update(it.id, { lines: it.detected, linked: false })}
-                          onMove={(d) => moveItem(index, d)}
-                          onRemove={() => remove(it.id)}
-                          onApplyAll={() => applyToAll(it)}
-                        />
-                      );
-                    })}
-                  </div>
-                </section>
-              ))}
-            </div>
-            <button
-              onClick={() => inputRef.current?.click()}
-              className="mt-8 w-full rounded-2xl border-2 border-dashed border-[var(--line)] py-8 text-[var(--muted)] hover:border-[var(--accent)]"
-            >
-              + Add more images
-            </button>
-          </>
-        )}
-      </main>
-
-      {items.length > 0 && (
-        <footer className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--line)] bg-[var(--panel)]/95 backdrop-blur">
-          <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-            <div className="text-sm">
-              <span className="font-semibold">{items.length}</span> image{items.length > 1 && "s"} →{" "}
-              <span className="font-semibold">{items.length * 4}</span> photos ·{" "}
-              <span className="font-semibold">{products.length}</span> product{products.length > 1 && "s"}
-              {busy && <span className="ml-3 text-[var(--accent)]">{busy}</span>}
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={clearAll}
-                disabled={!!busy}
-                className="rounded-lg border border-[var(--line)] px-3 py-2 text-sm hover:bg-[var(--hover)] disabled:opacity-50"
-              >
-                Clear all
-              </button>
-              <button
-                onClick={downloadFiles}
-                disabled={!!busy}
-                className="rounded-lg border border-[var(--line)] px-3 py-2 text-sm hover:bg-[var(--hover)] disabled:opacity-50"
-                title="Downloads each photo as a separate file (browser may ask to allow multiple downloads)"
-              >
-                Download files
-              </button>
-              <button
-                onClick={downloadZip}
-                disabled={!!busy}
-                className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-50"
-              >
-                Crop & download ZIP
-              </button>
-            </div>
-          </div>
-        </footer>
-      )}
-
-      {busy && items.length === 0 && (
-        <div className="fixed inset-x-0 bottom-6 mx-auto w-fit rounded-lg bg-black/80 px-4 py-2 text-sm text-white">{busy}</div>
-      )}
-    </div>
-  );
-}
-
-function ImageCard({
-  item,
-  index,
-  total,
-  firstNumber,
-  settings,
-  onLines,
-  onLinked,
-  onReset,
-  onMove,
-  onRemove,
-  onApplyAll,
-}: {
-  item: Item;
-  index: number;
-  total: number;
-  firstNumber: number;
-  settings: Settings;
-  onLines: (l: Lines) => void;
-  onLinked: (v: boolean) => void;
-  onReset: () => void;
-  onMove: (d: -1 | 1) => void;
-  onRemove: () => void;
-  onApplyAll: () => void;
-}) {
-  const rects = tileRects(item.width, item.height, item.lines);
-  const sizes = rects.map((r) => outputSize(r.w, r.h, settings));
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [preview, setPreview] = useState<{ url: string; w: number; h: number; kb: number }[] | null>(null);
-  const previewUrls = useRef<string[]>([]);
-
-  // Re-render the preview (debounced) whenever lines or settings change while it's open.
-  useEffect(() => {
-    if (!previewOpen) return;
-    let cancelled = false;
-    const t = setTimeout(async () => {
-      const made: string[] = [];
-      const img = await loadImage(item.url);
-      const blobs = await cropTiles(img, item.lines, processOptions(settings, item));
-      const out = await Promise.all(
-        blobs.map(async (b) => {
-          const url = URL.createObjectURL(b);
-          made.push(url);
-          const im = await loadImage(url);
-          return { url, w: im.naturalWidth, h: im.naturalHeight, kb: Math.round(b.size / 1024) };
-        }),
-      );
-      if (cancelled) return made.forEach((u) => URL.revokeObjectURL(u));
-      previewUrls.current.forEach((u) => URL.revokeObjectURL(u));
-      previewUrls.current = made;
-      setPreview(out);
-    }, 350);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [previewOpen, item, settings]);
-
-  // Free preview images when the preview is closed or the card is removed.
-  useEffect(() => {
-    if (previewOpen) return;
-    previewUrls.current.forEach((u) => URL.revokeObjectURL(u));
-    previewUrls.current = [];
-  }, [previewOpen]);
-  useEffect(() => {
-    const urls = previewUrls;
-    return () => urls.current.forEach((u) => URL.revokeObjectURL(u));
-  }, []);
-
-  const btn = "rounded-md border border-[var(--line)] px-2 py-1 text-xs hover:bg-[var(--hover)] disabled:opacity-40";
-  return (
-    <div className="overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--panel)] shadow-sm">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--line)] px-3 py-2">
-        <div className="min-w-0">
-          <div className="truncate text-sm font-semibold" title={item.file.name}>
-            Image {index + 1} · <span className="font-normal text-[var(--muted)]">{item.file.name}</span>
-          </div>
-          <div className="text-xs text-[var(--muted)] tabular-nums">
-            Photos {firstNumber}–{firstNumber + 3} · {sizes.map((r) => `${r.w}×${r.h}`).join(", ")}
-            {settings.trim && " (before trim)"}
-          </div>
-        </div>
-        <div className="flex items-center gap-1">
-          <button className={btn} onClick={() => onMove(-1)} disabled={index === 0} title="Move earlier">
-            ↑
-          </button>
-          <button className={btn} onClick={() => onMove(1)} disabled={index === total - 1} title="Move later">
-            ↓
-          </button>
-          <button className={`${btn} text-rose-600`} onClick={onRemove} title="Remove">
-            ✕
-          </button>
-        </div>
-      </div>
-      <div className="bg-[var(--canvas)] p-2">
-        <SplitEditor
-          url={item.url}
-          naturalWidth={item.width}
-          naturalHeight={item.height}
-          lines={item.lines}
-          linked={item.linked}
-          firstNumber={firstNumber}
-          onChange={onLines}
-        />
-      </div>
-      <div className="flex flex-wrap items-center gap-2 border-t border-[var(--line)] px-3 py-2">
-        <label className="flex items-center gap-1.5 text-xs">
-          <input type="checkbox" checked={item.linked} onChange={(e) => onLinked(e.target.checked)} />
-          Straight vertical line
-        </label>
-        <div className="ml-auto flex gap-1">
-          <button className={btn} onClick={onReset} title="Go back to the auto-detected positions">
-            Auto-detect
-          </button>
-          <button className={btn} onClick={() => onLines({ h: 0.5, vTop: 0.5, vBottom: 0.5 })}>
-            Center
-          </button>
-          {total > 1 && (
-            <button className={btn} onClick={onApplyAll} title="Copy these line positions to every image">
-              Apply to all
-            </button>
-          )}
-          <button
-            className={`${btn} ${previewOpen ? "bg-[var(--accent)] text-white" : ""}`}
-            onClick={() => {
-              setPreviewOpen((v) => !v);
-              setPreview(null);
-            }}
-          >
-            {previewOpen ? "Hide preview" : "Preview output"}
-          </button>
-        </div>
-      </div>
-      {previewOpen && (
-        <div className="grid grid-cols-4 gap-2 border-t border-[var(--line)] p-2">
-          {preview
-            ? preview.map((p, i) => (
-                <figure key={i} className="flex flex-col gap-1">
-                  <div className="flex aspect-square items-center justify-center overflow-hidden rounded-md bg-[var(--canvas)]">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={p.url} alt={`Photo ${firstNumber + i}`} className="checker max-h-full max-w-full shadow-sm" />
-                  </div>
-                  <figcaption className="text-center text-[11px] leading-tight text-[var(--muted)] tabular-nums">
-                    <b className="text-[var(--text)]">{firstNumber + i}</b> · {p.w}×{p.h}
-                    <br />
-                    <span className={settings.maxKB && p.kb > settings.maxKB ? "font-semibold text-amber-600" : ""}>
-                      {p.kb} KB{settings.maxKB > 0 && p.kb > settings.maxKB && " — over limit"}
-                    </span>
-                  </figcaption>
-                </figure>
-              ))
-            : <p className="col-span-4 py-6 text-center text-sm text-[var(--muted)]">Rendering…</p>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (p: Partial<Settings>) => void }) {
-  const field = "w-full rounded-md border border-[var(--line)] bg-[var(--canvas)] px-2 py-1 text-sm text-[var(--text)]";
-  const label = "flex flex-col gap-1 text-xs font-medium text-[var(--muted)]";
-  const group = "flex flex-col gap-3 rounded-lg border border-[var(--line)] p-3";
-  const heading = "text-xs font-semibold uppercase tracking-wide text-[var(--text)]";
-  const int = (v: string) => Math.max(0, parseInt(v) || 0);
-  const lossy = settings.format === "image/jpeg" || settings.format === "image/webp" || settings.format === "original";
-  const presets = [
-    { label: "Original", shape: "original" },
-    { label: "1:1", shape: "1:1" },
-    { label: "4:5", shape: "4:5" },
-    { label: "3:4", shape: "3:4" },
-    { label: "2:3", shape: "2:3" },
-    { label: "Exact size", shape: "exact" },
-  ] as const;
-
-  return (
-    <details className="rounded-xl border border-[var(--line)] bg-[var(--panel)]" open>
-      <summary className="cursor-pointer px-4 py-3 text-sm font-semibold">Output settings</summary>
-      <div className="grid gap-3 px-4 pb-4 md:grid-cols-2 xl:grid-cols-4">
-        {/* Naming */}
-        <div className={group}>
-          <div className={heading}>Naming</div>
-          <label className={label}>
-            Layout
-            <select className={field} value={settings.layout} onChange={(e) => onChange({ layout: e.target.value as Settings["layout"] })}>
-              <option value="flat">One folder: 1, 2, 3 … (continuous)</option>
-              <option value="folders">Folder per product: 1–8 each</option>
-            </select>
-          </label>
-          <div className="grid grid-cols-2 gap-2">
-            <label className={label}>
-              {settings.layout === "folders" ? "First product #" : "Start at"}
-              <input type="number" min={0} className={field} value={settings.startNumber} onChange={(e) => onChange({ startNumber: int(e.target.value) })} />
-            </label>
-            <label className={label}>
-              Images / product
-              <input type="number" min={1} className={field} value={settings.perProduct} onChange={(e) => onChange({ perProduct: Math.max(1, int(e.target.value)) })} />
-            </label>
-          </div>
-          <label className={label}>
-            Filename prefix
-            <input className={field} placeholder="e.g. jacket-" value={settings.prefix} onChange={(e) => onChange({ prefix: e.target.value.replace(/[\\/:*?"<>|]/g, "") })} />
-          </label>
-        </div>
-
-        {/* Size & shape */}
-        <div className={group}>
-          <div className={heading}>Size &amp; shape</div>
-          <div className="flex flex-wrap gap-1">
-            {presets.map((p) => (
-              <button
-                key={p.shape}
-                onClick={() => onChange({ shape: p.shape })}
-                className={`rounded-md border px-2 py-1 text-xs ${
-                  settings.shape === p.shape ? "border-[var(--accent)] bg-[var(--accent)] text-white" : "border-[var(--line)] hover:bg-[var(--hover)]"
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-          {settings.shape === "exact" && (
-            <div className="grid grid-cols-2 gap-2">
-              <label className={label}>
-                Width px
-                <input type="number" min={1} className={field} value={settings.exactW} onChange={(e) => onChange({ exactW: Math.max(1, int(e.target.value)) })} />
-              </label>
-              <label className={label}>
-                Height px
-                <input type="number" min={1} className={field} value={settings.exactH} onChange={(e) => onChange({ exactH: Math.max(1, int(e.target.value)) })} />
-              </label>
-            </div>
-          )}
-          {settings.shape !== "original" && (
-            <label className={label}>
-              How to fit
-              <select className={field} value={settings.fit} onChange={(e) => onChange({ fit: e.target.value as Settings["fit"] })}>
-                <option value="pad">Pad with white (keeps whole photo)</option>
-                <option value="fill">Fill frame (crops edges)</option>
-              </select>
-            </label>
-          )}
-          <div className="grid grid-cols-2 gap-2">
-            <label className={label}>
-              Max width px
-              <input type="number" min={0} placeholder="no limit" className={field} value={settings.maxW || ""} onChange={(e) => onChange({ maxW: int(e.target.value) })} />
-            </label>
-            <label className={label}>
-              Max height px
-              <input type="number" min={0} placeholder="no limit" className={field} value={settings.maxH || ""} onChange={(e) => onChange({ maxH: int(e.target.value) })} />
-            </label>
-          </div>
-        </div>
-
-        {/* Background */}
-        <div className={group}>
-          <div className={heading}>Background</div>
-          <div className="flex flex-col gap-1.5 text-sm">
-            {(
-              [
-                ["keep", "Keep as is"],
-                ["white", "Pure white (#FFFFFF)"],
-                ["transparent", "Transparent (PNG/WebP)"],
-              ] as const
-            ).map(([v, l]) => (
-              <label key={v} className="flex items-center gap-2">
-                <input type="radio" name="bgMode" checked={settings.bgMode === v} onChange={() => onChange({ bgMode: v })} />
-                {l}
-              </label>
-            ))}
-          </div>
-          {settings.bgMode !== "keep" && (
-            <label className={label}>
-              Strength: {settings.bgTolerance}
-              <input type="range" min={10} max={160} value={settings.bgTolerance} onChange={(e) => onChange({ bgTolerance: parseInt(e.target.value) })} />
-              <span className="font-normal">Raise it if grey shadows remain, lower it if the product edges get eaten. Use Preview to check.</span>
-            </label>
-          )}
-          {settings.bgMode === "transparent" && (settings.format === "image/jpeg" || settings.format === "original") && (
-            <p className="text-xs text-amber-600">JPG can&apos;t be transparent, so JPG photos will be saved as PNG.</p>
-          )}
-          <label className="flex flex-wrap items-center gap-2 text-sm">
-            <input type="checkbox" checked={settings.trim} onChange={(e) => onChange({ trim: e.target.checked })} />
-            Auto-trim empty space
-            {settings.trim && (
-              <span className="flex items-center gap-1 text-xs text-[var(--muted)]">
-                padding
-                <input type="number" min={0} className={`${field} w-16`} value={settings.trimPadding} onChange={(e) => onChange({ trimPadding: int(e.target.value) })} />
-                px
-              </span>
+        <main className="mx-auto max-w-7xl px-4">
+          <AnimatePresence mode="wait" initial={false}>
+            {!hasItems ? (
+              <motion.div key="empty" exit={{ opacity: 0, y: -16, transition: { duration: 0.25 } }}>
+                <Hero onPick={pick} active={dragOver} />
+              </motion.div>
+            ) : (
+              <motion.div key="work" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="pt-6" />
             )}
-          </label>
-        </div>
+          </AnimatePresence>
 
-        {/* Format & file size */}
-        <div className={group}>
-          <div className={heading}>Format &amp; file size</div>
-          <label className={label}>
-            Format
-            <select className={field} value={settings.format} onChange={(e) => onChange({ format: e.target.value as OutputFormat })}>
-              <option value="original">Same as original</option>
-              <option value="image/png">PNG (lossless)</option>
-              <option value="image/jpeg">JPG</option>
-              <option value="image/webp">WebP</option>
-            </select>
-          </label>
-          {lossy && (
-            <label className={label}>
-              Quality (JPG/WebP): {Math.round(settings.quality * 100)}
-              <input type="range" min={50} max={100} value={Math.round(settings.quality * 100)} onChange={(e) => onChange({ quality: parseInt(e.target.value) / 100 })} />
-            </label>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ ...softSpring, delay: 0.35 }}
+            className={hasItems ? "" : "mt-10"}
+          >
+            <SettingsPanel settings={settings} onChange={updateSettings} />
+          </motion.div>
+
+          {hasItems && (
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[var(--muted)]"
+            >
+              <span className="flex items-center gap-1.5">
+                <span className="h-0.5 w-4 rounded bg-[var(--cut-h)]" /> horizontal cut
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-3 w-0.5 rounded bg-[var(--cut-v)]" /> vertical cuts (top &amp; bottom move separately)
+              </span>
+              <span>Drag lines · click + arrow keys to nudge 1px (Shift = 10px) · magnifier shows while dragging</span>
+            </motion.p>
           )}
-          <label className={label}>
-            Max file size per photo (KB)
-            <input type="number" min={0} placeholder="no limit" className={field} value={settings.maxKB || ""} onChange={(e) => onChange({ maxKB: int(e.target.value) })} />
-            <span className="font-normal">
-              {settings.shape === "exact"
-                ? "Exact size is kept, so only quality is lowered (use JPG/WebP for small files)."
-                : settings.format === "image/png"
-                  ? "PNG is lossless, so it's made smaller by reducing dimensions."
-                  : "Lowers quality first, then dimensions if still too big."}
-            </span>
-          </label>
+
+          <LayoutGroup>
+            <div className="mt-5 space-y-10">
+              <AnimatePresence initial={false}>
+                {products.map((group, p) => (
+                  <motion.section
+                    key={`product-${p}`}
+                    layout
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0, transition: { duration: 0.2 } }}
+                  >
+                    <motion.h2 layout="position" className="mb-3 flex items-center gap-3">
+                      <span className="text-lg font-semibold tracking-tight">
+                        Product {settings.layout === "folders" ? p + settings.startNumber : p + 1}
+                      </span>
+                      <span className="rounded-full bg-[var(--accent-soft)] px-2.5 py-0.5 text-xs font-medium text-[var(--accent)]">
+                        {group.length * 4} photos
+                      </span>
+                      {group.length < settings.perProduct && (
+                        <span className="rounded-full bg-amber-500/12 px-2.5 py-0.5 text-xs font-medium text-amber-600 dark:text-amber-400">
+                          needs {settings.perProduct - group.length} more image{settings.perProduct - group.length > 1 && "s"}
+                        </span>
+                      )}
+                      <span className="h-px flex-1 bg-gradient-to-r from-[var(--line-strong)] to-transparent" />
+                    </motion.h2>
+                    <div className="grid gap-5 md:grid-cols-2">
+                      <AnimatePresence initial={false} mode="popLayout">
+                        {group.map((it, k) => {
+                          const index = p * settings.perProduct + k;
+                          return (
+                            <ImageCard
+                              key={it.id}
+                              item={it}
+                              index={index}
+                              total={items.length}
+                              firstNumber={numberLabel(index)}
+                              settings={settings}
+                              onLines={(lines) => update(it.id, { lines })}
+                              onLinked={(linked) =>
+                                update(it.id, { linked, lines: linked ? { ...it.lines, vBottom: it.lines.vTop } : it.lines })
+                              }
+                              onReset={() => update(it.id, { lines: it.detected, linked: false })}
+                              onMove={(d) => moveItem(index, d)}
+                              onRemove={() => remove(it.id)}
+                              onApplyAll={() => applyToAll(it)}
+                            />
+                          );
+                        })}
+                      </AnimatePresence>
+                    </div>
+                  </motion.section>
+                ))}
+              </AnimatePresence>
+            </div>
+
+            {hasItems && (
+              <motion.button
+                layout
+                onClick={pick}
+                whileHover={{ scale: 1.005 }}
+                whileTap={{ scale: 0.99 }}
+                transition={spring}
+                className="dropzone mt-10 flex w-full items-center justify-center gap-2 rounded-3xl py-10 text-sm font-medium text-[var(--muted)] hover:text-[var(--text)]"
+              >
+                <Plus /> Add more images
+              </motion.button>
+            )}
+          </LayoutGroup>
+        </main>
+
+        {/* Bottom action bar */}
+        <AnimatePresence>
+          {hasItems && (
+            <motion.div
+              initial={{ y: 120, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              exit={{ y: 120, opacity: 0 }}
+              transition={softSpring}
+              className="fixed inset-x-0 bottom-4 z-40 px-4"
+            >
+              <div className="glass-strong mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-3 overflow-hidden rounded-2xl px-4 py-3 shadow-[var(--shadow-lg)] relative">
+                <div className="flex items-center gap-4 text-sm">
+                  <Stat value={items.length} label={items.length === 1 ? "image" : "images"} />
+                  <span className="text-[var(--line-strong)]">→</span>
+                  <Stat value={items.length * 4} label="photos" />
+                  <span className="text-[var(--line-strong)]">·</span>
+                  <Stat value={products.length} label={products.length === 1 ? "product" : "products"} />
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="ghost" onClick={clearAll} disabled={!!busy}>
+                    <Trash /> <span className="hidden sm:inline">Clear</span>
+                  </Button>
+                  <Button onClick={downloadFiles} disabled={!!busy} title="Each photo as a separate file (browser may ask to allow multiple downloads)">
+                    <Download /> <span className="hidden sm:inline">Files</span>
+                  </Button>
+                  <Button variant="primary" onClick={downloadZip} disabled={!!busy} busy={!!busy} className="min-w-44">
+                    <AnimatePresence mode="wait" initial={false}>
+                      <motion.span
+                        key={busy?.label ?? "idle"}
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -8 }}
+                        transition={{ duration: 0.18 }}
+                        className="flex items-center gap-1.5"
+                      >
+                        {busy ? busy.label + "…" : <><Zap /> Crop &amp; download ZIP</>}
+                      </motion.span>
+                    </AnimatePresence>
+                  </Button>
+                </div>
+                {/* progress */}
+                <AnimatePresence>
+                  {busy && (
+                    <motion.div
+                      className="absolute inset-x-0 bottom-0 h-[3px] origin-left bg-gradient-to-r from-[var(--accent)] to-[var(--accent-2)]"
+                      initial={{ scaleX: 0 }}
+                      animate={{ scaleX: busy.progress ?? 0.5 }}
+                      exit={{ opacity: 0 }}
+                      transition={softSpring}
+                    />
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Busy pill while analysing the very first upload */}
+        <AnimatePresence>
+          {busy && !hasItems && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 20 }}
+              className="glass fixed inset-x-0 bottom-6 z-50 mx-auto w-fit rounded-full px-4 py-2 text-sm shadow-[var(--shadow-lg)]"
+            >
+              {busy.label}…
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Toast */}
+        <AnimatePresence>
+          {toast && (
+            <motion.div
+              initial={{ opacity: 0, y: -20, scale: 0.95 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -20, scale: 0.95 }}
+              transition={spring}
+              className="glass fixed inset-x-0 top-20 z-50 mx-auto flex w-fit items-center gap-2 rounded-full py-2 pr-4 pl-2 text-sm font-medium shadow-[var(--shadow-lg)]"
+            >
+              <span className="grid h-6 w-6 place-items-center rounded-full bg-emerald-500 text-white">
+                <Check size={14} />
+              </span>
+              {toast}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Full-page drop overlay */}
+        <AnimatePresence>
+          {dragOver && hasItems && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="pointer-events-none fixed inset-0 z-50 grid place-items-center bg-[var(--bg)]/70 backdrop-blur-sm"
+            >
+              <motion.div
+                initial={{ scale: 0.9 }}
+                animate={{ scale: 1 }}
+                exit={{ scale: 0.9 }}
+                transition={spring}
+                className="dropzone flex flex-col items-center gap-3 rounded-[2rem] px-16 py-14"
+                data-active="true"
+              >
+                <Upload size={36} className="text-[var(--accent)]" />
+                <span className="text-lg font-semibold">Drop to add images</span>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </MotionConfig>
+  );
+}
+
+function Stat({ value, label }: { value: number; label: string }) {
+  return (
+    <span className="flex items-baseline gap-1">
+      <AnimatePresence mode="popLayout" initial={false}>
+        <motion.b
+          key={value}
+          initial={{ y: 10, opacity: 0 }}
+          animate={{ y: 0, opacity: 1 }}
+          exit={{ y: -10, opacity: 0 }}
+          transition={spring}
+          className="font-mono text-base tabular-nums"
+        >
+          {value}
+        </motion.b>
+      </AnimatePresence>
+      <span className="text-xs text-[var(--muted)]">{label}</span>
+    </span>
+  );
+}
+
+/* ---------------- Empty state ---------------- */
+
+const fadeUp = {
+  hidden: { opacity: 0, y: 24 },
+  show: (i: number) => ({ opacity: 1, y: 0, transition: { ...softSpring, delay: 0.08 * i } }),
+};
+
+function Hero({ onPick, active }: { onPick: () => void; active: boolean }) {
+  return (
+    <section className="grid items-center gap-10 pt-14 pb-2 lg:grid-cols-[1.1fr_1fr] lg:pt-20">
+      <div>
+        <motion.div
+          custom={0}
+          variants={fadeUp}
+          initial="hidden"
+          animate="show"
+          className="mb-5 inline-flex items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--panel)] px-3 py-1 text-xs text-[var(--muted)] backdrop-blur"
+        >
+          <Grid size={13} className="text-[var(--accent)]" /> 2×2 grid → 4 product photos
+        </motion.div>
+        <motion.h1
+          custom={1}
+          variants={fadeUp}
+          initial="hidden"
+          animate="show"
+          className="text-4xl leading-[1.05] font-semibold tracking-tight sm:text-5xl lg:text-6xl"
+        >
+          Split grids into <span className="text-gradient">perfect product photos</span>.
+        </motion.h1>
+        <motion.p custom={2} variants={fadeUp} initial="hidden" animate="show" className="mt-5 max-w-xl text-base text-[var(--muted)] sm:text-lg">
+          Drop in any number of 2×2 images. Cut lines are detected automatically, numbered per product, sized for your store
+          and zipped — all without leaving your browser.
+        </motion.p>
+
+        <motion.button
+          custom={3}
+          variants={fadeUp}
+          initial="hidden"
+          animate="show"
+          whileHover={{ scale: 1.01 }}
+          whileTap={{ scale: 0.98 }}
+          onClick={onPick}
+          data-active={active ? "true" : undefined}
+          className="dropzone glass mt-8 flex w-full max-w-xl flex-col items-center gap-3 rounded-3xl px-6 py-10 text-center"
+        >
+          <motion.span
+            animate={active ? { y: -6, scale: 1.1 } : { y: [0, -5, 0] }}
+            transition={active ? spring : { duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
+            className="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-[var(--accent)] to-[var(--accent-2)] text-white shadow-lg"
+          >
+            <Upload size={24} />
+          </motion.span>
+          <span className="text-base font-semibold">{active ? "Release to add images" : "Drop your grid images here"}</span>
+          <span className="text-sm text-[var(--muted)]">
+            or <span className="font-medium text-[var(--accent)]">browse files</span> · paste with ⌘/Ctrl + V · sorted by filename
+          </span>
+        </motion.button>
+
+        <motion.ol custom={4} variants={fadeUp} initial="hidden" animate="show" className="mt-8 grid max-w-xl grid-cols-3 gap-3 text-xs">
+          {[
+            ["Upload", "Any amount, 2 images per product"],
+            ["Adjust", "Auto lines, drag to fine-tune"],
+            ["Download", "Numbered folders in a ZIP"],
+          ].map(([t, d], i) => (
+            <li key={t} className="rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3 backdrop-blur">
+              <div className="mb-1 flex items-center gap-2 font-semibold">
+                <span className="grid h-5 w-5 place-items-center rounded-full bg-[var(--accent-soft)] font-mono text-[10px] text-[var(--accent)]">
+                  {i + 1}
+                </span>
+                {t}
+              </div>
+              <div className="text-[var(--muted)]">{d}</div>
+            </li>
+          ))}
+        </motion.ol>
+      </div>
+
+      <SplitDemo />
+    </section>
+  );
+}
+
+/** Looping illustration: a 2×2 grid that splits into 4 numbered photos and back. */
+function SplitDemo() {
+  const [split, setSplit] = useState(false);
+  useEffect(() => {
+    const t = setInterval(() => setSplit((s) => !s), 2200);
+    return () => clearInterval(t);
+  }, []);
+  const tiles = [
+    { x: -1, y: -1, hue: "from-violet-400/70 to-fuchsia-400/60" },
+    { x: 1, y: -1, hue: "from-sky-400/60 to-violet-400/60" },
+    { x: -1, y: 1, hue: "from-fuchsia-400/60 to-rose-400/60" },
+    { x: 1, y: 1, hue: "from-indigo-400/60 to-sky-400/60" },
+  ];
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.9, rotate: -2 }}
+      animate={{ opacity: 1, scale: 1, rotate: 0 }}
+      transition={{ ...softSpring, delay: 0.25 }}
+      className="relative mx-auto hidden aspect-square w-full max-w-md lg:block"
+      aria-hidden
+    >
+      <div className="absolute inset-10 rounded-[2.5rem] bg-gradient-to-br from-[var(--accent)]/25 to-[var(--accent-2)]/20 blur-3xl" />
+      <div className="absolute inset-0 grid place-items-center">
+        <div className="relative h-72 w-72">
+          {tiles.map((t, i) => (
+            <motion.div
+              key={i}
+              animate={{
+                x: split ? t.x * 26 : 0,
+                y: split ? t.y * 26 : 0,
+                rotate: split ? t.x * t.y * 3 : 0,
+                borderRadius: split ? 24 : 6,
+              }}
+              transition={{ type: "spring", stiffness: 180, damping: 18, delay: i * 0.05 }}
+              className={`absolute h-[142px] w-[142px] overflow-hidden border border-white/20 bg-gradient-to-br ${t.hue} shadow-[var(--shadow-lg)] backdrop-blur-md`}
+              style={{ left: t.x < 0 ? 2 : 146, top: t.y < 0 ? 2 : 146 }}
+            >
+              {/* abstract product silhouette */}
+              <div className="absolute inset-x-8 top-6 h-8 rounded-full bg-white/50" />
+              <div className="absolute inset-x-5 top-16 bottom-0 rounded-t-[2rem] bg-white/40" />
+              <motion.span
+                animate={{ opacity: split ? 1 : 0, scale: split ? 1 : 0.6 }}
+                transition={spring}
+                className="absolute top-2 right-2 grid h-6 w-6 place-items-center rounded-full bg-black/60 font-mono text-[11px] font-semibold text-white"
+              >
+                {i + 1}
+              </motion.span>
+            </motion.div>
+          ))}
+          {/* cut lines */}
+          <motion.div
+            animate={{ opacity: split ? 0 : 1, scaleX: split ? 0.3 : 1 }}
+            className="absolute inset-x-0 top-1/2 h-[2px] -translate-y-1/2 bg-[var(--cut-h)] shadow-[0_0_12px_var(--cut-h)]"
+          />
+          <motion.div
+            animate={{ opacity: split ? 0 : 1, scaleY: split ? 0.3 : 1 }}
+            className="absolute inset-y-0 left-1/2 w-[2px] -translate-x-1/2 bg-[var(--cut-v)] shadow-[0_0_12px_var(--cut-v)]"
+          />
         </div>
       </div>
-    </details>
+    </motion.div>
   );
 }

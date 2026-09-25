@@ -53,13 +53,13 @@ type Settings = {
 const DEFAULTS: Settings = {
   startNumber: 1,
   perProduct: 2,
-  layout: "flat",
+  layout: "folders",
   format: "original",
   quality: 0.92,
   prefix: "",
   trim: false,
   trimPadding: 0,
-  shape: "original",
+  shape: "exact",
   fit: "pad",
   exactW: 1000,
   exactH: 1250,
@@ -658,7 +658,7 @@ function SettingsPanel({ settings, onChange }: { settings: Settings; onChange: (
             <label className={label}>
               How to fit
               <select className={field} value={settings.fit} onChange={(e) => onChange({ fit: e.target.value as Settings["fit"] })}>
-                <option value="pad">Pad with background (keeps whole photo)</option>
+                <option value="pad">Pad with white (keeps whole photo)</option>
                 <option value="fill">Fill frame (crops edges)</option>
               </select>
             </label>

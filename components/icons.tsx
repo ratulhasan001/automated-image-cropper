@@ -25,3 +25,8 @@ export const Plus = make(<path d="M12 5v14M5 12h14" />);
 export const Link = make(<><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1" /><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" /></>);
 export const Grid = make(<><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></>);
 export const Zap = make(<path d="M13 2 3 14h9l-1 8 10-12h-9z" />);
+export const Eraser = make(<><path d="m7 21-4-4a2 2 0 0 1 0-3L13 4a2 2 0 0 1 3 0l5 5a2 2 0 0 1 0 3l-9 9" /><path d="M7 21h14M9 10l6 6" /></>);
+export const Undo = make(<><path d="M9 14 4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 0 10h-3" /></>);
+export const Brush = make(<><circle cx="12" cy="12" r="7" /><circle cx="12" cy="12" r="2" fill="currentColor" /></>);
+export const LineH = make(<path d="M3 12h18M3 8v8M21 8v8" />);
+export const LineV = make(<path d="M12 3v18M8 3h8M8 21h8" />);

@@ -11,8 +11,6 @@ import { Check, Download, Grid, Plus, Shield, Trash, Upload, Zap } from "@/compo
 import { cropTiles, detectLines, extensionFor, loadImage } from "@/lib/image";
 import { APP_NAME, DEFAULTS, processOptions, SETTINGS_KEY, type Item, type Settings } from "@/lib/settings";
 
-const naturalCompare = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }).compare;
-
 function triggerDownload(blob: Blob, name: string) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -33,6 +31,7 @@ export default function Home() {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
+  const uploadQueue = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     try {
@@ -57,36 +56,39 @@ export default function Home() {
     });
   };
 
-  const addFiles = useCallback(async (list: FileList | File[]) => {
-    const files = Array.from(list)
-      .filter((f) => f.type.startsWith("image/"))
-      .sort((a, b) => naturalCompare(a.name, b.name));
+  // Images are kept in the order they were added. Batches run one after another,
+  // so a second upload can't interleave with one that is still being analysed.
+  const addFiles = useCallback((list: FileList | File[]) => {
+    const files = Array.from(list).filter((f) => f.type.startsWith("image/"));
     if (!files.length) return;
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      setBusy({ label: `Analysing ${i + 1} of ${files.length}`, progress: i / files.length });
-      const url = URL.createObjectURL(file);
-      try {
-        const img = await loadImage(url);
-        const { lines, background } = detectLines(img);
-        const item: Item = {
-          id: crypto.randomUUID(),
-          file,
-          url,
-          width: img.naturalWidth,
-          height: img.naturalHeight,
-          lines,
-          detected: lines,
-          background,
-          linked: false,
-        };
-        // Add one at a time so cards cascade in.
-        setItems((prev) => [...prev, item]);
-      } catch {
-        URL.revokeObjectURL(url);
+    uploadQueue.current = uploadQueue.current.then(async () => {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        setBusy({ label: `Analysing ${i + 1} of ${files.length}`, progress: i / files.length });
+        const url = URL.createObjectURL(file);
+        try {
+          const img = await loadImage(url);
+          const { lines, background } = detectLines(img);
+          const item: Item = {
+            id: crypto.randomUUID(),
+            file,
+            url,
+            width: img.naturalWidth,
+            height: img.naturalHeight,
+            lines,
+            detected: lines,
+            background,
+            linked: false,
+            erase: [],
+          };
+          // Add one at a time so cards cascade in.
+          setItems((prev) => [...prev, item]);
+        } catch {
+          URL.revokeObjectURL(url);
+        }
       }
-    }
-    setBusy(null);
+      setBusy(null);
+    });
   }, []);
 
   // Paste images from clipboard
@@ -326,6 +328,7 @@ export default function Home() {
                                 update(it.id, { linked, lines: linked ? { ...it.lines, vBottom: it.lines.vTop } : it.lines })
                               }
                               onReset={() => update(it.id, { lines: it.detected, linked: false })}
+                              onErase={(erase) => update(it.id, { erase })}
                               onMove={(d) => moveItem(index, d)}
                               onRemove={() => remove(it.id)}
                               onApplyAll={() => applyToAll(it)}
@@ -546,7 +549,7 @@ function Hero({ onPick, active }: { onPick: () => void; active: boolean }) {
           </motion.span>
           <span className="text-base font-semibold">{active ? "Release to add images" : "Drop your grid images here"}</span>
           <span className="text-sm text-[var(--muted)]">
-            or <span className="font-medium text-[var(--accent)]">browse files</span> · paste with ⌘/Ctrl + V · sorted by filename
+            or <span className="font-medium text-[var(--accent)]">browse files</span> · paste with ⌘/Ctrl + V · kept in upload order
           </span>
         </motion.button>
 

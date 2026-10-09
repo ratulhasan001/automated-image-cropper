@@ -1,4 +1,4 @@
-import { resolveFormat, type Lines, type OutputFormat, type ProcessOptions, type RGB, type Shape } from "@/lib/image";
+import { resolveFormat, type Lines, type OutputFormat, type ProcessOptions, type RGB, type Shape, type Stroke } from "@/lib/image";
 
 export const APP_NAME = "Yo-Yo Cropper";
 
@@ -12,6 +12,7 @@ export type Item = {
   detected: Lines;
   background: RGB;
   linked: boolean;
+  erase: Stroke[];
 };
 
 export type Settings = {
@@ -76,6 +77,7 @@ export function processOptions(s: Settings, item: Item): ProcessOptions {
     maxW: s.maxW,
     maxH: s.maxH,
     maxKB: s.maxKB,
+    erase: item.erase,
   };
 }
 

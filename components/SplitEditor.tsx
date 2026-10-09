@@ -1,10 +1,13 @@
 "use client";
 
 import { AnimatePresence, motion } from "motion/react";
-import { useRef, useState } from "react";
-import type { Lines } from "@/lib/image";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { drawStrokes, type Lines, type Stroke } from "@/lib/image";
 
 type LineKey = keyof Lines;
+
+/** White eraser: freehand brush, or a straight horizontal / vertical line. `size` is in screen px. */
+export type EraserTool = { mode: "brush" | "h" | "v"; size: number };
 
 type Props = {
   url: string;
@@ -14,6 +17,9 @@ type Props = {
   linked: boolean;
   firstNumber: number;
   onChange: (lines: Lines) => void;
+  strokes: Stroke[];
+  onStrokes: (strokes: Stroke[]) => void;
+  eraser: EraserTool | null; // null = eraser off, cut lines are draggable
 };
 
 const LOUPE = 150; // px
@@ -21,10 +27,105 @@ const ZOOM = 4;
 
 const clamp = (v: number) => Math.min(0.98, Math.max(0.02, v));
 
-export default function SplitEditor({ url, naturalWidth, naturalHeight, lines, linked, firstNumber, onChange }: Props) {
+export default function SplitEditor({
+  url,
+  naturalWidth,
+  naturalHeight,
+  lines,
+  linked,
+  firstNumber,
+  onChange,
+  strokes,
+  onStrokes,
+  eraser,
+}: Props) {
   const box = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState<LineKey | null>(null);
   const [loupe, setLoupe] = useState<{ fx: number; fy: number } | null>(null);
+
+  /* ---------- White eraser ---------- */
+
+  const paint = useRef<HTMLCanvasElement>(null);
+  const brushCursor = useRef<HTMLDivElement>(null);
+  const drawing = useRef<{ stroke: Stroke; start: [number, number] } | null>(null);
+
+  // Redraw every stroke (plus the one in progress) onto the screen-resolution overlay.
+  const redraw = useCallback(() => {
+    const c = paint.current, el = box.current;
+    if (!c || !el) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(el.clientWidth * dpr), h = Math.round(el.clientHeight * dpr);
+    if (c.width !== w || c.height !== h) {
+      c.width = w;
+      c.height = h;
+    }
+    const ctx = c.getContext("2d")!;
+    ctx.clearRect(0, 0, w, h);
+    const all = drawing.current ? [...strokes, drawing.current.stroke] : strokes;
+    drawStrokes(ctx, all, w / naturalWidth);
+  }, [strokes, naturalWidth]);
+
+  useEffect(() => {
+    redraw();
+    const el = box.current;
+    if (!el) return;
+    const ro = new ResizeObserver(redraw);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [redraw]);
+
+  const toNatural = (e: React.PointerEvent): [number, number] => {
+    const rect = box.current!.getBoundingClientRect();
+    const fx = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    const fy = Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height));
+    return [fx * naturalWidth, fy * naturalHeight];
+  };
+
+  const moveCursor = (e: React.PointerEvent) => {
+    const c = brushCursor.current, el = box.current;
+    if (!c || !el || !eraser) return;
+    const rect = el.getBoundingClientRect();
+    c.style.opacity = "1";
+    c.style.transform = `translate(${e.clientX - rect.left - eraser.size / 2}px, ${e.clientY - rect.top - eraser.size / 2}px)`;
+  };
+
+  const endStroke = () => {
+    const d = drawing.current;
+    if (!d) return;
+    drawing.current = null;
+    onStrokes([...strokes, d.stroke]);
+  };
+
+  const eraserHandlers = eraser && {
+    onPointerDown: (e: React.PointerEvent) => {
+      e.preventDefault();
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      const p = toNatural(e);
+      const size = (eraser.size * naturalWidth) / box.current!.clientWidth;
+      drawing.current = { stroke: { size, points: [p], straight: eraser.mode !== "brush" }, start: p };
+      redraw();
+    },
+    onPointerMove: (e: React.PointerEvent) => {
+      moveCursor(e);
+      const d = drawing.current;
+      if (!d) return;
+      const [x, y] = toNatural(e);
+      const [sx, sy] = d.start;
+      if (eraser.mode === "h") d.stroke.points = [d.start, [x, sy]];
+      else if (eraser.mode === "v") d.stroke.points = [d.start, [sx, y]];
+      else {
+        const last = d.stroke.points[d.stroke.points.length - 1];
+        if (Math.hypot(x - last[0], y - last[1]) < d.stroke.size / 8) return;
+        d.stroke.points.push([x, y]);
+      }
+      redraw();
+    },
+    onPointerUp: endStroke,
+    onPointerCancel: endStroke,
+    onPointerLeave: () => {
+      if (brushCursor.current) brushCursor.current.style.opacity = "0";
+    },
+  };
 
   const apply = (key: LineKey, value: number) => {
     const v = clamp(value);
@@ -131,9 +232,9 @@ export default function SplitEditor({ url, naturalWidth, naturalHeight, lines, l
         aria-orientation={horizontal ? "vertical" : "horizontal"}
         aria-valuenow={Math.round(lines[key] * (horizontal ? naturalHeight : naturalWidth))}
         tabIndex={0}
-        className={`group absolute z-20 flex touch-none items-center justify-center outline-none ${
+        className={`group absolute z-20 flex touch-none items-center justify-center outline-none transition-opacity duration-300 ${
           horizontal ? "inset-x-0 h-6 -translate-y-1/2 cursor-row-resize" : "w-6 -translate-x-1/2 cursor-col-resize"
-        }`}
+        } ${eraser ? "opacity-35" : ""}`}
         style={style}
         {...handlers(key)}
       >
@@ -168,6 +269,7 @@ export default function SplitEditor({ url, naturalWidth, naturalHeight, lines, l
     <div ref={box} className="relative w-full select-none" style={{ aspectRatio: `${naturalWidth} / ${naturalHeight}` }}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img src={url} alt="" draggable={false} className="absolute inset-0 h-full w-full" />
+      <canvas ref={paint} className="pointer-events-none absolute inset-0 h-full w-full" />
 
       {quadrants.map((q, i) => (
         <span
@@ -184,6 +286,19 @@ export default function SplitEditor({ url, naturalWidth, naturalHeight, lines, l
       {cut("vBottom", "Vertical split, bottom row")}
 
       <AnimatePresence>{loupeEl}</AnimatePresence>
+
+      {/* Eraser layer sits above the cut lines, so they can't be dragged while erasing. */}
+      {eraserHandlers && (
+        <div className="absolute inset-0 z-[25] cursor-none touch-none overflow-hidden" {...eraserHandlers}>
+          <div
+            ref={brushCursor}
+            className={`pointer-events-none absolute top-0 left-0 border-2 border-[var(--accent)] bg-white/60 opacity-0 shadow-[0_0_0_1px_rgba(0,0,0,.35)] ${
+              eraser.mode === "brush" ? "rounded-full" : "rounded-[3px]"
+            }`}
+            style={{ width: eraser.size, height: eraser.size }}
+          />
+        </div>
+      )}
     </div>
   );
 }

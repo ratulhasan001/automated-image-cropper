@@ -2,10 +2,10 @@
 
 import { AnimatePresence, motion } from "motion/react";
 import { forwardRef, useEffect, useRef, useState } from "react";
-import SplitEditor from "./SplitEditor";
-import { Button, Switch, softSpring } from "./ui";
-import { ArrowDown, ArrowUp, Close, Copy, Eye, Target, Wand } from "./icons";
-import { cropTiles, loadImage, outputSize, tileRects, type Lines } from "@/lib/image";
+import SplitEditor, { type EraserTool } from "./SplitEditor";
+import { Button, Segmented, Switch, softSpring } from "./ui";
+import { ArrowDown, ArrowUp, Brush, Close, Copy, Eraser, Eye, LineH, LineV, Target, Trash, Undo, Wand } from "./icons";
+import { cropTiles, loadImage, outputSize, tileRects, type Lines, type Stroke } from "@/lib/image";
 import { processOptions, type Item, type Settings } from "@/lib/settings";
 
 type Props = {
@@ -17,6 +17,7 @@ type Props = {
   onLines: (l: Lines) => void;
   onLinked: (v: boolean) => void;
   onReset: () => void;
+  onErase: (strokes: Stroke[]) => void;
   onMove: (d: -1 | 1) => void;
   onRemove: () => void;
   onApplyAll: () => void;
@@ -25,7 +26,7 @@ type Props = {
 type Preview = { url: string; w: number; h: number; kb: number };
 
 const ImageCard = forwardRef<HTMLDivElement, Props>(function ImageCard(
-  { item, index, total, firstNumber, settings, onLines, onLinked, onReset, onMove, onRemove, onApplyAll },
+  { item, index, total, firstNumber, settings, onLines, onLinked, onReset, onErase, onMove, onRemove, onApplyAll },
   ref,
 ) {
   const rects = tileRects(item.width, item.height, item.lines);
@@ -34,6 +35,18 @@ const ImageCard = forwardRef<HTMLDivElement, Props>(function ImageCard(
   const [previewOpen, setPreviewOpen] = useState(false);
   const [preview, setPreview] = useState<Preview[] | null>(null);
   const previewUrls = useRef<string[]>([]);
+  const [eraserOn, setEraserOn] = useState(false);
+  const [eraserMode, setEraserMode] = useState<EraserTool["mode"]>("brush");
+  const [eraserSize, setEraserSize] = useState(24);
+  const eraser: EraserTool | null = eraserOn ? { mode: eraserMode, size: eraserSize } : null;
+
+  // Esc leaves eraser mode.
+  useEffect(() => {
+    if (!eraserOn) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setEraserOn(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [eraserOn]);
 
   // Re-render the preview (debounced) whenever lines or settings change while it's open.
   useEffect(() => {
@@ -121,12 +134,24 @@ const ImageCard = forwardRef<HTMLDivElement, Props>(function ImageCard(
           linked={item.linked}
           firstNumber={firstNumber}
           onChange={onLines}
+          strokes={item.erase}
+          onStrokes={onErase}
+          eraser={eraser}
         />
       </div>
 
       <footer className="flex flex-wrap items-center gap-2 px-4 py-3">
         <Switch checked={item.linked} onChange={onLinked} label={<span className="text-xs">Straight line</span>} />
         <div className="ml-auto flex flex-wrap gap-1">
+          <Button
+            size="sm"
+            variant={eraserOn ? "primary" : "ghost"}
+            onClick={() => setEraserOn((v) => !v)}
+            title="White eraser — paint over spots or lines to make them white"
+            aria-pressed={eraserOn}
+          >
+            <Eraser /> Eraser
+          </Button>
           <Button size="sm" variant="ghost" onClick={onReset} title="Back to auto-detected positions">
             <Wand /> Auto
           </Button>
@@ -150,6 +175,54 @@ const ImageCard = forwardRef<HTMLDivElement, Props>(function ImageCard(
           </Button>
         </div>
       </footer>
+
+      <AnimatePresence initial={false}>
+        {eraserOn && (
+          <motion.div
+            key="eraser"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ height: softSpring, opacity: { duration: 0.2 } }}
+            className="overflow-hidden"
+          >
+            <div className="flex flex-wrap items-center gap-3 border-t border-[var(--line)] px-4 py-3">
+              <Segmented
+                value={eraserMode}
+                onChange={setEraserMode}
+                options={[
+                  { value: "brush", label: <span className="flex items-center gap-1"><Brush size={13} /> Brush</span> },
+                  { value: "h", label: <span className="flex items-center gap-1"><LineH size={13} /> Horizontal</span> },
+                  { value: "v", label: <span className="flex items-center gap-1"><LineV size={13} /> Vertical</span> },
+                ]}
+              />
+              <label className="flex items-center gap-2 text-xs text-[var(--muted)]">
+                Size
+                <input
+                  type="range"
+                  min={2}
+                  max={120}
+                  value={eraserSize}
+                  onChange={(e) => setEraserSize(Number(e.target.value))}
+                  className="w-28 accent-[var(--accent)]"
+                />
+                <span className="w-7 font-mono tabular-nums">{eraserSize}</span>
+              </label>
+              <div className="ml-auto flex gap-1">
+                <Button size="sm" variant="ghost" onClick={() => onErase(item.erase.slice(0, -1))} disabled={!item.erase.length} title="Undo last stroke">
+                  <Undo /> Undo
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => onErase([])} disabled={!item.erase.length} title="Remove all eraser strokes">
+                  <Trash /> Clear
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setEraserOn(false)} title="Done (Esc)">
+                  Done
+                </Button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence initial={false}>
         {previewOpen && (

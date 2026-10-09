@@ -12,6 +12,35 @@ export type RGB = [number, number, number];
 
 export type OutputFormat = "original" | "image/png" | "image/jpeg" | "image/webp";
 
+/** A white-eraser stroke, in natural image pixels. */
+export type Stroke = { size: number; points: [number, number][]; straight: boolean };
+
+/** Paints strokes in white. `scale` maps natural image pixels to canvas pixels. */
+export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: Stroke[], scale = 1) {
+  ctx.save();
+  ctx.scale(scale, scale);
+  ctx.strokeStyle = ctx.fillStyle = "#fff";
+  ctx.lineJoin = "round";
+  for (const s of strokes) {
+    const [first, ...rest] = s.points;
+    ctx.lineWidth = s.size;
+    ctx.lineCap = s.straight ? "square" : "round";
+    if (!rest.length) {
+      // A single click: a dot (round brush) or square (line modes).
+      ctx.beginPath();
+      if (s.straight) ctx.rect(first[0] - s.size / 2, first[1] - s.size / 2, s.size, s.size);
+      else ctx.arc(first[0], first[1], s.size / 2, 0, Math.PI * 2);
+      ctx.fill();
+      continue;
+    }
+    ctx.beginPath();
+    ctx.moveTo(first[0], first[1]);
+    for (const [x, y] of rest) ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 export function loadImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -173,8 +202,10 @@ export function tileRects(W: number, H: number, l: Lines): Rect[] {
   ];
 }
 
+type Source = HTMLImageElement | HTMLCanvasElement;
+
 /** Shrink a tile to its content (drops leftover gutter / neighbour-free white space). */
-function trimRect(img: HTMLImageElement, r: Rect, bg: RGB, pad: number): Rect {
+function trimRect(img: Source, r: Rect, bg: RGB, pad: number): Rect {
   const c = document.createElement("canvas");
   c.width = r.w;
   c.height = r.h;
@@ -226,6 +257,7 @@ export type ProcessOptions = {
   maxW: number; // 0 = no limit
   maxH: number;
   maxKB: number; // 0 = no limit
+  erase: Stroke[]; // white-eraser strokes applied before cropping
 };
 
 type Canvas = HTMLCanvasElement;
@@ -378,7 +410,7 @@ async function encode(c: Canvas, o: ProcessOptions): Promise<Blob> {
   return blob;
 }
 
-export async function processTile(img: HTMLImageElement, rect: Rect, o: ProcessOptions): Promise<Blob> {
+export async function processTile(img: Source, rect: Rect, o: ProcessOptions): Promise<Blob> {
   const r = o.trim ? trimRect(img, rect, o.background, o.trimPadding) : rect;
   let [c, ctx] = makeCanvas(r.w, r.h);
   ctx.drawImage(img, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
@@ -396,8 +428,16 @@ export async function processTile(img: HTMLImageElement, rect: Rect, o: ProcessO
 }
 
 export async function cropTiles(img: HTMLImageElement, lines: Lines, o: ProcessOptions): Promise<Blob[]> {
-  const rects = tileRects(img.naturalWidth, img.naturalHeight, lines);
+  const W = img.naturalWidth, H = img.naturalHeight;
+  let src: Source = img;
+  if (o.erase.length) {
+    const [c, ctx] = makeCanvas(W, H);
+    ctx.drawImage(img, 0, 0);
+    drawStrokes(ctx, o.erase);
+    src = c;
+  }
+  const rects = tileRects(W, H, lines);
   const blobs: Blob[] = [];
-  for (const r of rects) blobs.push(await processTile(img, r, o));
+  for (const r of rects) blobs.push(await processTile(src, r, o));
   return blobs;
 }

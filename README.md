@@ -6,8 +6,6 @@ Drop in any number of grid images. Yo-Yo Cropper finds the cut lines for you, le
 
 **100% client-side:** images never leave your machine. There is no upload, no backend, and no server cost.
 
-![Sample 2×2 grid](sample.png)
-
 ---
 
 ## Table of contents
@@ -199,7 +197,6 @@ All image processing lives in [`lib/image.ts`](lib/image.ts) and runs on HTML `<
 ├── lib/
 │   ├── image.ts              # Detection, cropping, background cleanup, resize, encode
 │   └── settings.ts           # Settings and Item types, defaults, option mapping
-├── sample.png                # Example 2×2 grid for testing
 ├── next.config.ts
 ├── postcss.config.mjs
 └── tsconfig.json
@@ -221,7 +218,7 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:3000> and drop in `sample.png` to try it out.
+Open <http://localhost:3000> and drop in any 2×2 grid image to try it out.
 
 ### Scripts
 
